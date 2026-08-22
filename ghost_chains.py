@@ -10,6 +10,7 @@ from typing import Any
 
 LOOKBACK_WINDOW_SECONDS = 24 * 60 * 60
 EPS = 1e-9
+REPEAT_EDGE_WEIGHT = 0.5
 
 
 class GhostChainsValidationError(ValueError):
@@ -151,7 +152,15 @@ class GhostChainsService:
         reverse_adjacency = _build_reverse_adjacency(prior_transactions)
         existing_neighbors = adjacency.get(transaction.from_user_id, set())
         if transaction.to_user_id in existing_neighbors:
-            return 0.0
+            repeat_count = sum(
+                1
+                for prior in prior_transactions
+                if prior.from_user_id == transaction.from_user_id
+                and prior.to_user_id == transaction.to_user_id
+            )
+            raw_score = REPEAT_EDGE_WEIGHT * math.log1p(repeat_count)
+            score = 1.0 - math.exp(-raw_score / 1.9)
+            return round(max(0.0, min(1.0, score)), 6)
 
         reverse_distances_to_u = _bfs_distances(transaction.from_user_id, reverse_adjacency)
         forward_distances_from_v = _bfs_distances(transaction.to_user_id, adjacency)
