@@ -74,13 +74,13 @@ iii. s - Sell
 3. Year-To      |  Quantity of Stock
 Expected response content type: application/json
 
-Sample calculation of profits
-j-2037-2036
-Jump from year 2037 to year 2036
-b-Apple-50
-Buy 50 Apple stocks at $10 = $500
-j-2036-2037
-Jump from year 2036 to year 2037
-s-Apple-50
-Sell 50 Apple stocks at $100 = $5000
-Profit: $5000 - $500 = $4500
+1. Sample calculation of profits
+  j-2037-2036
+2. Jump from year 2037 to year 2036
+  b-Apple-50
+3. Buy 50 Apple stocks at $10 = $500
+  j-2036-2037
+4. Jump from year 2036 to year 2037
+  s-Apple-50
+5. Sell 50 Apple stocks at $100 = $5000
+  Profit: $5000 - $500 = $4500
