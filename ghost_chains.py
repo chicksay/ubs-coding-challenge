@@ -46,7 +46,6 @@ W_FAN = 0.35
 W_CYCLE = 12.0
 CYCLE_REINFORCEMENT = 1.0
 REPEAT_EDGE_DAMPING = 0.35
-TEMPORAL_FLOOR = 0.75
 
 # Phase 2: identity signal. A shared ipAddress/deviceId is scored relative to
 # where the transaction sits in the graph, not as a standalone rule -- these
@@ -206,19 +205,7 @@ class GhostChainsService:
        return dist, loops_back
 
 
-   def _oldest_edge_within(self, nodes):
-       oldest = None
-       for src in sorted(nodes):
-           for dst in self._adj.get(src, ()):
-               if dst not in nodes:
-                   continue
-               first = self._edge_times[(src, dst)][0]
-               if oldest is None or first < oldest:
-                   oldest = first
-       return oldest
-
-
-   def _score(self, src, dst, created, ip, device):
+   def _score(self, src, dst, ip, device):
        upstream, src_looped = self._walk(self._rev, src)
        downstream, dst_looped = self._walk(self._adj, dst)
        src_reaches, _ = self._walk(self._adj, src)
@@ -290,10 +277,6 @@ class GhostChainsService:
        )
 
 
-       if cycle_nodes:
-           mass *= self._temporal_factor(cycle_nodes, created)
-
-
        if mass <= 0.0:
            return 0.0
        return round(1.0 - (1.0 + mass / SATURATION) ** -TAIL, 9)
@@ -345,17 +328,6 @@ class GhostChainsService:
 
        return total
 
-   def _temporal_factor(self, nodes, created):
-       oldest = self._oldest_edge_within(nodes)
-       if oldest is None:
-           return 1.0
-       span = (created - oldest).total_seconds()
-       if span <= 0:
-           return 1.0
-       share = min(1.0, span / LOOKBACK.total_seconds())
-       return 1.0 - (1.0 - TEMPORAL_FLOOR) * share
-
-
    def _process_one(self, raw):
        if not isinstance(raw, dict):
            return {"txId": None, "riskScore": 0.0}
@@ -402,7 +374,7 @@ class GhostChainsService:
        if src == dst:
            score = 0.0
        else:
-           score = self._score(src, dst, created, ip, device)
+           score = self._score(src, dst, ip, device)
 
 
        # A transaction that is itself already outside the window is scored but

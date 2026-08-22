@@ -52,7 +52,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
             ("Cascade", "Oakridge"),
             ("Oakridge", "Apex"),
         ])
-        self.assertEqual(scores[-1], 0.564647158)
+        self.assertEqual(scores[-1], 0.564720728)
 
     def test_example_5_multi_loop(self):
         scores = _run_chain([
@@ -62,7 +62,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
             ("Apex", "Nimbus"),
             ("Nimbus", "Meridian"),
         ])
-        self.assertEqual(scores[-1], 0.690655806)
+        self.assertEqual(scores[-1], 0.690778073)
 
     def test_examples_are_strictly_increasing(self):
         ex1 = _run_chain([("Meridian", "Apex")])[-1]
@@ -85,7 +85,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
 class SelfTransferAndIsolationTests(unittest.TestCase):
     def test_self_transfer_always_scores_zero(self):
         scores = _run_chain([("M", "A"), ("A", "C"), ("C", "M"), ("M", "M")])
-        self.assertEqual(scores, [0.0, 0.049751093, 0.548485363, 0.0])
+        self.assertEqual(scores, [0.0, 0.049751093, 0.548559875, 0.0])
 
     def test_structurally_isolated_transaction_scores_zero_even_with_unrelated_prior_activity(self):
         scores = _run_chain([
@@ -108,6 +108,20 @@ class IdempotencyAndValidationTests(unittest.TestCase):
         svc = GhostChainsService()
         result = svc.process_transactions({"transactions": [_tx("a", "A", "B", 0)]})
         self.assertEqual(result["transactions"][0]["riskScore"], 0.0)
+
+
+class TemporalSpacingConsistencyTests(unittest.TestCase):
+    def test_return_loop_score_is_independent_of_edge_spacing_within_window(self):
+        tight = _run_chain([
+            ("Meridian", "Apex"), ("Apex", "Cascade"),
+            ("Cascade", "Oakridge"), ("Oakridge", "Apex"),
+        ])[-1]
+        spread = _run_chain([
+            ("Meridian", "Apex"), ("Apex", "Cascade"),
+            ("Cascade", "Oakridge", {"createdAt": "2026-06-08T23:40:00Z"}),
+            ("Oakridge", "Apex", {"createdAt": "2026-06-09T11:45:00Z"}),
+        ])[-1]
+        self.assertEqual(tight, spread)
 
 
 class ResetTests(unittest.TestCase):
