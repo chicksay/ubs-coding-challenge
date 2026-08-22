@@ -38,7 +38,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
 
     def test_example_2_extension(self):
         scores = _run_chain([("Meridian", "Apex"), ("Apex", "Cascade")])
-        self.assertEqual(scores[-1], 0.082828427)
+        self.assertEqual(scores[-1], 0.049751093)
 
     def test_example_3_convergence(self):
         scores = _run_chain([
@@ -47,7 +47,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
             ("Apex", "Sterling"),
             ("Horizon", "Sterling"),
         ])
-        self.assertEqual(scores[-1], 0.170996945)
+        self.assertEqual(scores[-1], 0.152311329)
 
     def test_example_4_return(self):
         scores = _run_chain([
@@ -56,7 +56,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
             ("Cascade", "Oakridge"),
             ("Oakridge", "Apex"),
         ])
-        self.assertEqual(scores[-1], 0.6395935)
+        self.assertEqual(scores[-1], 0.564647158)
 
     def test_example_5_multi_loop(self):
         scores = _run_chain([
@@ -66,7 +66,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
             ("Apex", "Nimbus"),
             ("Nimbus", "Meridian"),
         ])
-        self.assertEqual(scores[-1], 0.761169318)
+        self.assertEqual(scores[-1], 0.690655806)
 
     def test_examples_are_strictly_increasing(self):
         ex1 = _run_chain([("Meridian", "Apex")])[-1]
@@ -118,7 +118,7 @@ class DeepChainCoherenceTests(unittest.TestCase):
 class SelfTransferAndIsolationTests(unittest.TestCase):
     def test_self_transfer_always_scores_zero(self):
         scores = _run_chain([("M", "A"), ("A", "C"), ("C", "M"), ("M", "M")])
-        self.assertEqual(scores, [0.0, 0.082828427, 0.623990058, 0.0])
+        self.assertEqual(scores, [0.0, 0.049751093, 0.548485363, 0.0])
 
     def test_structurally_isolated_transaction_scores_zero_even_with_unrelated_prior_activity(self):
         scores = _run_chain([
@@ -159,8 +159,8 @@ class TemporalSpacingConsistencyTests(unittest.TestCase):
             ("Cascade", "Oakridge", {"createdAt": "2026-06-08T23:40:00Z"}),
             ("Oakridge", "Apex", {"createdAt": "2026-06-09T11:45:00Z"}),
         ])[-1]
-        self.assertEqual(tight, 0.6395935)
-        self.assertEqual(spread, 0.57494527)
+        self.assertEqual(tight, 0.564647158)
+        self.assertEqual(spread, 0.503290482)
         self.assertLess(spread, tight)
 
 
@@ -180,7 +180,7 @@ class WindowBoundaryTests(unittest.TestCase):
             ("A", "B", {"createdAt": "2026-06-08T12:00:00Z"}),
             ("B", "A", {"createdAt": "2026-06-09T11:59:59Z"}),
         ])
-        self.assertEqual(scores[-1], 0.576189309)
+        self.assertEqual(scores[-1], 0.513014721)
 
 
 class ResetTests(unittest.TestCase):
@@ -199,7 +199,7 @@ class Phase2IdentityScoringTests(unittest.TestCase):
             ("Apex", "Cascade", {"deviceId": "dev_ios_7f3a91"}),
             ("Cascade", "Horizon", {"deviceId": "dev_ios_7f3a91"}),
         ])
-        self.assertEqual(scores, [0.0, 0.210775591, 0.239879901])
+        self.assertEqual(scores, [0.0, 0.132739289, 0.152765003])
 
     def test_example_2_identity_divergence_under_branching(self):
         scores = _run_chain([
@@ -208,7 +208,7 @@ class Phase2IdentityScoringTests(unittest.TestCase):
             ("Apex", "Sterling", {"deviceId": "dev_ios_7f3a91"}),
             ("Cascade", "Oakridge", {"deviceId": "dev_android_c2e4b8"}),
         ])
-        self.assertEqual(scores, [0.0, 0.210775591, 0.226805605, 0.122515722])
+        self.assertEqual(scores, [0.0, 0.132739289, 0.15172507, 0.074655924])
         self.assertLess(scores[3], scores[2])  # diverging branch loses the consistency bonus
 
     def test_example_3_identity_shift_mid_flow(self):
@@ -218,7 +218,7 @@ class Phase2IdentityScoringTests(unittest.TestCase):
             ("Cascade", "Horizon", {"deviceId": "dev_android_c2e4b8"}),
             ("Horizon", "Nimbus", {"deviceId": "dev_android_c2e4b8"}),
         ])
-        self.assertEqual(scores, [0.0, 0.210775591, 0.122515722, 0.254943322])
+        self.assertEqual(scores, [0.0, 0.132739289, 0.074655924, 0.163309685])
 
     def test_example_4_shared_identity_across_disconnected_components(self):
         scores = _run_chain([
@@ -226,7 +226,7 @@ class Phase2IdentityScoringTests(unittest.TestCase):
             ("Cascade", "Horizon", {"ipAddress": "10.0.0.1"}),
             ("Oakridge", "Sterling", {"ipAddress": "10.0.0.1"}),
         ])
-        self.assertEqual(scores, [0.0, 0.337936699, 0.397873092])
+        self.assertEqual(scores, [0.0, 0.223743725, 0.270047044])
         self.assertGreater(scores[2], scores[1])  # reused by more external components now
 
     def test_disconnected_transactions_without_shared_identity_still_score_zero(self):
@@ -243,7 +243,7 @@ class Phase2IdentityScoringTests(unittest.TestCase):
             ("Apex", "Cascade", {"deviceId": "dev_ios_7f3a91"}),
             ("Cascade", "Horizon", {}),  # device dropped after 2 consistent legs
         ])
-        self.assertEqual(scores, [0.0, 0.210775591, 0.499201239])
+        self.assertEqual(scores, [0.0, 0.132739289, 0.354102862])
 
     def test_isolated_transaction_with_identity_but_no_prior_context_scores_zero(self):
         scores = _run_chain([("M", "A", {"deviceId": "dev_x"})])

@@ -1,0 +1,364 @@
+Here is the content of the page properly formatted into Markdown. I've placed it inside a code block so you can easily copy and paste it directly into your `.md` file.
+
+```markdown
+# Phase 3 - Value Signal
+
+## Event and Scoring
+This challenge is released in *three cumulative phases*.
+
+| *Current Phase* | *Evaluation Includes* |
+| --- | --- |
+| Phase 1 | Phase 1 requirements |
+| Phase 2 | Phases 1 and 2 requirements |
+| Phase 3 | Phases 1, 2 and 3 requirements |
+
+Each phase's evaluation re-tests the requirements of every earlier phase within the same evaluation run. A Phase 2 evaluation therefore re-checks Phase 1 behaviour, and a Phase 3 evaluation re-checks Phases 1 and 2 behaviour. Extend your system without breaking what already works.
+
+## Phases Schedule
+*Start with Phase 1 only.* Phases 2 and 3 are unlocked during the event — ignore them until announced. When they arrive, extend your system without breaking what already works.
+
+## Scoring Overview
+You do *not* need to match an absolute “correct” score for each transaction. You need a coherent model that consistently ranks suspicious activity above ordinary flow.
+
+Submissions are evaluated across two dimensions:
+- **Detection Quality:** How accurately your system ranks more suspicious transactions above less suspicious ones.
+- **Structural Consistency:** How coherently your model behaves across structurally related scenarios. Systems built on principled graph models are expected to outperform implementations tuned to specific patterns.
+
+In addition, evaluating a phase during its *active window* grants an *earliness bonus*. The bonus rewards a working system evaluated early within a phase's window; it is applied on top of the two scored dimensions and does not change what is scored.
+
+Final standing reflects the two scored dimensions combined, with the per-phase earliness bonus applied.
+
+Phase start times are announced via the coordinator and the challenge room / Teams channel; they are not published in advance in these documents.
+
+---
+
+## System Requirements
+
+### Service Overview
+Participants must implement a real-time *transaction risk scoring service* for an anti–money laundering (AML) environment.
+
+The system receives transactions continuously and must assign a *risk score between 0.0 and 1.0* to each transaction at the moment it is processed.
+
+The service is expected to operate under *stateful, streaming conditions,* where historical transactions within the active lookback window influence future scoring behavior.
+
+### Required Endpoints
+Participants must implement the following HTTPS endpoints:
+
+#### Health Check
+`GET /ghost-chains/health`
+```json
+{ "status" : "ok" }
+
+```
+
+This endpoint is used to verify service availability.
+
+#### State Reset
+
+`POST /ghost-chains/reset`
+
+**Request:**
+
+```json
+{ "clearTransactions" : true }
+
+```
+
+**Response:**
+
+```json
+{ "clearTransactions" : true }
+
+```
+
+**Behavior:**
+
+* Clears all internal state related to previously processed transactions.
+* Resets graph construction, caches, and any derived structures.
+* Must restore the system to a clean initial state equivalent to startup.
+
+#### Transaction Processing
+
+`POST /ghost-chains/transactions`
+
+**Request fields:**
+
+* `transactions`: Array of transaction objects:
+* `txId`: Unique string identifier for the transaction.
+* `fromUserId`: Identifier of the sending entity. (*User* is a convenience label for any identity — account, legal entity, or other counterparty.)
+* `toUserId`: Identifier of the receiving entity.
+* `amount`: Transfer amount as a number.
+* `createdAt`: ISO 8601 timestamp of the transaction.
+* `ipAddress` *(optional)*: Network address used to initiate the transaction. Omitted when unknown.
+* `deviceId` *(optional)*: Device identifier used to initiate the transaction. Omitted when unknown.
+
+
+
+*Optional fields may be absent on any transaction; this must not cause processing to fail.*
+
+**Request:**
+
+```json
+{
+  "transactions": [
+    {
+      "txId": "tx_meridian_001",
+      "fromUserId": "meridian_holdings",
+      "toUserId": "apex_logistics",
+      "amount": 370.0,
+      "createdAt": "2026-06-08T12:00:00Z"
+    },
+    {
+      "txId": "tx_cascade_014",
+      "fromUserId": "cascade_payments",
+      "toUserId": "horizon_capital",
+      "amount": 100.0,
+      "createdAt": "2026-06-08T12:01:00Z"
+    }
+  ]
+}
+
+```
+
+**Response fields:**
+
+* `transactions`: Array of result objects:
+* `txId`: Echoes the transaction identifier from the request.
+* `riskScore`: Risk score in [0.0, 1.0].
+
+
+
+**Response:**
+
+```json
+{
+  "transactions": [
+    {
+      "txId": "tx_meridian_001",
+      "riskScore": 0.0
+    },
+    {
+      "txId": "tx_cascade_014",
+      "riskScore": 0.0
+    }
+  ]
+}
+
+```
+
+**Behavior:**
+
+* Each transaction must be assigned a risk score immediately upon processing.
+* Multiple transactions in a single request must be processed sequentially in order.
+* The response must preserve input ordering.
+
+---
+
+## Getting Started
+
+1. Implement the three endpoints above.
+2. Smoke-test with the commands below. Replace `localhost:8080` with your server's host address.
+3. Register your public base URL with the coordinator and trigger an evaluation.
+
+```bash
+curl -s http://localhost:8080/ghost-chains/health
+
+curl -s -X POST http://localhost:8080/ghost-chains/reset \
+  -H 'Content-Type: application/json' \
+  -d '{"clearTransactions": true}' 
+  
+curl -s -X POST http://localhost:8080/ghost-chains/transactions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "transactions": [
+      {
+        "txId": "tx_meridian_001",
+        "fromUserId": "meridian_holdings",
+        "toUserId": "apex_logistics",
+        "amount": 370.0,
+        "createdAt": "2026-06-08T12:00:00Z"
+      }
+    ]
+  }'
+
+```
+
+---
+
+## State and Execution Model
+
+Build a stateful, streaming service that maintains a rolling graph of account transactions and assigns relative risk scores within a bounded lookback window.
+
+* **Streaming state.** Score each transaction using only information available at that point. State is updated incrementally — no reprocessing of history is required. Maintain state sufficient for:
+* Graph relationships between entities
+* Temporal ordering of transactions
+* Derived structural and behavioural signals
+
+
+* **Lookback window (W = 24 hours).** Only transactions created within the most recent 24 hours are active. Expired transactions must be removed from graph state and must not influence scoring. Be precise about boundary conditions.
+* **Ordering.** Within a single request, process transactions in the order provided. Across requests, arrival order defines global state evolution.
+* **Idempotency.** Each `txId` is unique. If a `txId` is submitted more than once with an identical payload, return the original score and make no state changes. Consider what should happen if the payload differs.
+* **Risk scores** are real numbers in `[0.0, 1.0]` representing relative suspiciousness — not calibrated probabilities. A higher score means more suspicious. Scores must be comparable within the same running system state, and for identical inputs after a reset, outputs must be consistent.
+* **Forward compatibility.** Later phases introduce new optional fields. Ignore unknown or absent fields gracefully; do not reject transactions that include unrecognised attributes.
+* **Performance.** Handle continuous streaming input with memory usage bounded by the active lookback window.
+
+---
+
+## System Observation and Diagnostics
+
+When your submission produces a ranking that disagrees with the reference model, the platform does not disclose absolute scores or internal evaluation details. Instead, a diagnostic array is returned identifying which signal dimensions showed disagreement. A phase's evaluation can emit only the observation categories listed in that phase's document.
+
+### Severity Interpretation
+
+Observation categories describe where evaluator disagreement was detected. Multiple categories may be reported simultaneously. Severity reflects the magnitude of disagreement between your submission's output and reference behaviour for the evaluated scenario. Severity is computed dynamically and is not tied to any specific challenge phase or test difficulty level. If no disagreement is detected for a scenario, no diagnostic payload is generated.
+
+### Diagnostic Payload Format
+
+`STRUCTURAL_DEVIATION: Moderate, TEMPORAL_DEVIATION: Low`
+
+---
+
+## Phase 3 Briefing
+
+Some networks go dark: no IP, no device fingerprint. Just the money, moving in ways that betray its origin.
+
+That is what we call *ghost chains*.
+
+Layering often pushes value along a chain where each hop keeps most of the prior amount. A single amount means little alone; along an inferred flow, the trail of amounts can confirm or contradict a pattern.
+
+Assign a *higher risk score* when value evidence increases combined suspicion.
+
+### Core Principle
+
+`amount` forms a value signal inside structurally inferred flow segments. Do not blindly aggregate amounts across unrelated branches without structural segmentation.
+
+**Combining with identity.** Identity signals from Phase 2 remain active in Phase 3. In particular, an identity attribute that vanishes mid-flow on a connected path (present on earlier legs, absent on a later leg) is a distinct evasion pattern — treat the absence as an observable state, not merely a missing value, when weighing the flow.
+
+### Objectives
+
+* Combine value scoring with structural and identity signals
+* Interpret amount progression inside inferred flow segments
+
+### Earlier Phases
+
+All Phase 1 and Phase 2 requirements continue to apply in Phase 3. The Phase 1 Constraints Checklist still applies. Phase 3 introduces no new mechanical requirements; it interprets amount as a value signal (see Core Principle). Behaviours not covered here are left for you to reason about.
+
+---
+
+## Phase 3 Examples
+
+These examples show transaction sequences from first to last. Assume that the preceding transactions have already been scored, and that the final transaction is now being evaluated. Amounts use a single synthetic currency unit.
+
+### Example 1 - Consistent Value Decay
+
+1. Meridian Holdings → Apex Logistics (`10000`)
+2. Apex Logistics → Cascade Payments (`9910`)
+3. Cascade Payments → Horizon Capital (`9820.81`)
+4. Horizon Capital → Nimbus Trading (`9732.42`)
+
+**Interpretation:**
+A single directed path carries a consistent progressive value reduction. Each step retains slightly less than the previous amount.
+
+### Example 2 - Competing Flow Hypotheses
+
+1. Meridian Holdings → Apex Logistics (`10000`)
+2. Apex Logistics → Cascade Payments (`9800`)
+3. Apex Logistics → Sterling Bridge (`5000`)
+4. Cascade Payments → Horizon Capital (`9700`)
+5. Sterling Bridge → Oakridge Imports (`4900`)
+
+**Interpretation:**
+Two branches from Apex Logistics each carry their own internally consistent value progression. The graph supports two independent flow interpretations; no single global value ratio applies across the full graph.
+
+### Example 3 - Value Trajectory Reversal
+
+1. Meridian Holdings → Apex Logistics (`10000`)
+2. Apex Logistics → Cascade Payments (`9950`)
+3. Cascade Payments → Horizon Capital (`9800`)
+4. Horizon Capital → Nimbus Trading (`9950`)
+
+**Interpretation:**
+A structurally continuous path Meridian Holdings → Apex Logistics → Cascade Payments → Horizon Capital → Nimbus Trading exists. The amount at Horizon Capital → Nimbus Trading (`9950`) exceeds the preceding step Cascade Payments → Horizon Capital (`9800`), reversing the prior reduction along the same path.
+
+### Example 4 - Convergence of Separate Value Paths
+
+1. Meridian Holdings → Apex Logistics (`10000`)
+2. Apex Logistics → Cascade Payments (`9800`)
+3. Apex Logistics → Sterling Bridge (`5000`)
+4. Cascade Payments → Horizon Capital (`9700`)
+5. Sterling Bridge → Horizon Capital (`4950`)
+
+**Interpretation:**
+Two independent branches from Apex Logistics arrive at the same destination (Horizon Capital). The graph now contains structural convergence, while the value trajectories that arrive at Horizon Capital remain distinct. Structural and value observations must therefore be considered together when interpreting the resulting flow.
+
+### Expected Ordering
+
+These examples are intended to illustrate different forms of value evidence within structural flow. For the last transaction in each example:
+
+* **Example 1** should receive the lowest risk score of the four. Consistent value decay along a single path represents the characteristic layering pattern rather than a deviation from it.
+* **Example 3** should receive the highest risk score of the four. A value trajectory reversal against structural continuity is a direct contradiction: the expected degradation pattern is violated while the structural path remains intact.
+* **Examples 2 and 4** test value continuity under qualitatively different conditions — divergence and convergence respectively — and are not directly comparable in risk.
+
+---
+
+## Cross-Signal Examples
+
+The following examples show transactions where structural, identity, and value observations are simultaneously active. No expected ordering is provided. These scenarios illustrate that signals must be interpreted as part of a unified system rather than evaluated in isolation.
+
+Each example shows a sequence from first to last. The final transaction is the one being evaluated.
+
+### Phase 1 and Phase 2
+
+1. Meridian Holdings → Apex Logistics (`deviceId: dev_ios_7f3a91`)
+2. Apex Logistics → Cascade Payments (`deviceId: dev_ios_7f3a91`)
+3. Cascade Payments → Horizon Capital (`deviceId: dev_android_c2e4b8`)
+4. Horizon Capital → Meridian Holdings (`deviceId: dev_android_c2e4b8`)
+
+**Interpretation:**
+
+* Transaction 4 closes a directed cycle: Horizon Capital returns value to Meridian Holdings, an upstream origin in the active path. The path Meridian Holdings → Apex Logistics → Cascade Payments → Horizon Capital → Meridian Holdings is now closed.
+* The device fingerprint changes at Cascade Payments → Horizon Capital. The cycle is completed on device `dev_android_c2e4b8`, while earlier edges used `dev_ios_7f3a91`.
+* Structural and identity observations are simultaneously present for the final transaction.
+
+### Phase 1 and Phase 3
+
+1. Meridian Holdings → Apex Logistics (`10000`)
+2. Apex Logistics → Cascade Payments (`9800`)
+3. Cascade Payments → Horizon Capital (`9700`)
+4. Horizon Capital → Apex Logistics (`9850`)
+
+**Interpretation:**
+
+* Transaction 4 creates a return path: Horizon Capital sends to Apex Logistics, a counterparty from which Horizon Capital indirectly received value. A path Apex Logistics → Cascade Payments → Horizon Capital → Apex Logistics is now present.
+* The amount for Horizon Capital → Apex Logistics (`9850`) exceeds the preceding Cascade Payments → Horizon Capital edge (`9700`).
+* Structural and value observations are simultaneously present for the final transaction.
+
+### Phase 2 and Phase 3
+
+1. Meridian Holdings → Apex Logistics (`10000, ipAddress: 10.0.0.1`)
+2. Cascade Payments → Horizon Capital (`10000, ipAddress: 10.0.0.1`)
+3. Apex Logistics → Nimbus Trading (`9800, ipAddress: 10.0.0.1`)
+4. Horizon Capital → Nimbus Trading (`10100, ipAddress: 10.0.0.2`)
+
+**Interpretation:**
+
+* Transactions 1–3 share a network address across two structurally disconnected chains. An identity relationship exists between otherwise unrelated flows.
+* Transaction 4 creates structural convergence at Nimbus Trading, joining the two previously independent chains. It carries a different network address from transactions 1–3, introducing a change in identity at the convergence point.
+* The amount for Horizon Capital → Nimbus Trading (`10100`) exceeds Cascade Payments → Horizon Capital (`10000`).
+* Structural, identity, and value observations are each present for the final transaction.
+
+---
+
+## Phase 3 Diagnostics Vocabulary
+
+Phase 3 evaluations can emit the following observation categories:
+
+* `STRUCTURAL_DEVIATION`: Disagreement detected in the evaluation of structural signals.
+* `TEMPORAL_DEVIATION`: Disagreement detected in temporal signal evaluation or lookback window handling.
+* `IDENTITY_DEVIATION`: Disagreement detected in the evaluation of identity signals.
+* `VALUE_FLOW_DEVIATION`: Disagreement detected in the evaluation of value signals.
+* `CROSS_SIGNAL_DEVIATION`: Disagreement detected under scenarios involving multiple simultaneous signal types.
+
+```
+
+```

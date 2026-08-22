@@ -51,20 +51,9 @@ MAX_VISIT = 2000
 
 
 W_NEW_PAIR = 1.0
-# W_EXTRA_ROUTE, W_FAN, W_CYCLE below (and SATURATION/TAIL further down) were
-# moved from their original hand-picked values to the most robust point found
-# by ghost_chains_gridsearch.py's constraint-margin search over the diagnosis
-# doc's flagged weighting-mismatch constants (ghost_chains_diagnosis.txt,
-# cause 1) -- the combination that maximized the worst-case margin across all
-# seven known ordinal constraints (Phase 1 ordering, Phase 2 divergence/reuse,
-# Phase 3 ordering/convergence, both cross-signal checks), not the combination
-# tuned to any single example. All five parameters landed on the edge of the
-# grid actually searched, so this is the most robust point *found*, not a
-# confirmed interior optimum -- treat the next real evaluation's
-# STRUCTURAL_DEVIATION severity as the actual test of this choice.
-W_EXTRA_ROUTE = 2.0
-W_FAN = 0.2
-W_CYCLE = 8.0
+W_EXTRA_ROUTE = 3.0
+W_FAN = 0.35
+W_CYCLE = 12.0
 CYCLE_REINFORCEMENT = 1.0
 REPEAT_EDGE_DAMPING = 0.35
 
@@ -106,8 +95,8 @@ VALUE_DEVIATION_SCALE = 0.01
 # Scores are relative ranks, so the mass -> [0,1) map must stay strictly
 # increasing. A map that flattens to 1.0 would tie every busy transaction
 # together and destroy the ranking on dense streams.
-SATURATION = 3.0
-TAIL = 0.9
+SATURATION = 4.0
+TAIL = 0.7
 
 
 _DECAY_POW = [DECAY ** i for i in range(MAX_DEPTH * 2 + 4)]
