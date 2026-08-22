@@ -55,7 +55,7 @@ def _handle_ghost_chains_transactions(body):
     return GHOST_CHAINS.process_transactions(body)
 
 
-def _handle_ghost_chains_clear(body):
+def _handle_ghost_chains_reset(body):
     return GHOST_CHAINS.clear(body)
 
 
@@ -64,7 +64,7 @@ POST_ROUTES = {
     "/solve": _handle_adaptive_gateway,
     "/showdown": _handle_showdown,
     "/ghost-chains/transactions": _handle_ghost_chains_transactions,
-    "/ghost-chains/clear": _handle_ghost_chains_clear,
+    "/ghost-chains/reset": _handle_ghost_chains_reset,
 }
 
 GET_ROUTES = {
