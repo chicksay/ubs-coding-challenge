@@ -18,6 +18,9 @@ EXACT_MAX_YEARS = 9
 EXACT_MAX_ENERGY = 30
 EXACT_MAX_LOTS = 40
 EXACT_SOLVER_SECONDS = 0.45
+DFS_MAX_YEARS = 10
+DFS_MAX_DEPTH = 5
+DFS_MAX_EVALS = 350
 
 
 def solve_all(payload):
@@ -61,6 +64,7 @@ def solve_one(case, deadline=None):
         _targeted_chain_trades(seed, deadline),
         _two_step_chain_trades(seed, deadline),
         _simple_round_trips(seed, deadline),
+        _dfs_route_trips(seed, deadline),
         _beam_trips(seed, deadline),
         _oscillate_pairs(seed, deadline),
         _pair_trades(seed, deadline),
@@ -936,6 +940,78 @@ def _simple_round_trips(seed, deadline=None):
                 best_profit = profit
                 best_actions = actions
     
+    return best_actions
+
+
+def _dfs_route_trips(seed, deadline=None):
+    energy = seed["energy"]
+    capital = seed["capital"]
+    timeline = seed["timeline"]
+    years = [year for year in sorted(timeline) if year <= HOME and year != HOME]
+    if not years:
+        return []
+
+    scored = []
+    for year in years:
+        score = 0
+        for stock, info in timeline.get(year, {}).items():
+            buy_price = info["price"]
+            if buy_price <= 0 or info["qty"] <= 0:
+                continue
+            best_sell = 0
+            for other in timeline:
+                if other == year or abs(HOME - year) + abs(other - year) + abs(HOME - other) > energy:
+                    continue
+                best_sell = max(best_sell, _price(timeline, other, stock) or 0)
+            if best_sell > buy_price:
+                affordable = min(info["qty"], max(1, capital // buy_price))
+                score += (best_sell - buy_price) * affordable
+        for other, stocks in timeline.items():
+            if other == year:
+                continue
+            for stock, info in stocks.items():
+                sell_price = _price(timeline, year, stock)
+                if sell_price and sell_price > info["price"]:
+                    score += sell_price - info["price"]
+        scored.append((score, year))
+
+    years = [year for _score, year in sorted(scored, reverse=True)[:DFS_MAX_YEARS]]
+    years.sort()
+    best_actions = []
+    best_profit = -1
+    evals = 0
+
+    def evaluate(path):
+        nonlocal best_actions, best_profit, evals
+        if evals >= DFS_MAX_EVALS:
+            return False
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        evals += 1
+        acts, _new_cap, _new_qty, _new_hold = _walk(path, capital, _qty_map(timeline), {}, timeline)
+        profit = _replay(seed, acts)
+        if profit is not None and profit > best_profit:
+            best_profit = profit
+            best_actions = acts
+        return True
+
+    def dfs(current, remaining, path, unused):
+        if len(path) > 1 and current != HOME:
+            home_cost = abs(current - HOME)
+            if home_cost <= remaining and not evaluate(path + [HOME]):
+                return
+        if len(path) - 1 >= DFS_MAX_DEPTH:
+            return
+        for nxt in list(unused):
+            cost = abs(current - nxt)
+            if cost > remaining or abs(nxt - HOME) > remaining - cost:
+                continue
+            rest = [year for year in unused if year != nxt]
+            dfs(nxt, remaining - cost, path + [nxt], rest)
+            if evals >= DFS_MAX_EVALS or (deadline is not None and time.monotonic() >= deadline):
+                return
+
+    dfs(HOME, energy, [HOME], years)
     return best_actions
 
 
