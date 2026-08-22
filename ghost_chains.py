@@ -1,361 +1,351 @@
-from __future__ import annotations
-
-import json
-import math
-from collections import deque
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any
+"""Phase 1 Ghost Chains scorer.
 
 
-LOOKBACK_WINDOW_SECONDS = 24 * 60 * 60
-EPS = 1e-9
-REPEAT_EDGE_WEIGHT = 0.5
+The score of an edge u -> v is the increase in the graph's capacity to carry
+recurring flow, measured over the active 24h window:
 
 
-class GhostChainsValidationError(ValueError):
-    pass
+ * pairs (a, d) that become connected for the first time      -> weak signal
+ * pairs (a, d) that gain an additional route                 -> medium signal
+ * nodes that can now reach themselves through the new edge   -> strong signal
 
 
-@dataclass(frozen=True)
-class Transaction:
-    tx_id: str
-    from_user_id: str
-    to_user_id: str
-    amount: float
-    created_at: float
-    ip_address: str | None
-    device_id: str | None
+Every contribution is discounted by the length of the path it creates, so
+short structures dominate long ones. Pair mass factorises as
+sum_a y^dist(a,u) * sum_d y^dist(v,d), so no pair is ever enumerated.
 
 
-@dataclass(frozen=True)
-class StoredTransaction:
-    transaction: Transaction
-    risk_score: float
+Active history is exactly the most recent 24 hours: an edge is live while
+its age is strictly less than 24h, and expired edges are deleted from the
+graph so they cannot influence any later score.
+"""
 
 
-def parse_iso8601(timestamp: str) -> float:
-    try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise GhostChainsValidationError(f"Invalid ISO-8601 timestamp: {timestamp}") from exc
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    else:
-        parsed = parsed.astimezone(UTC)
-
-    return parsed.timestamp()
+import bisect
+import heapq
+import logging
+import threading
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 
-def normalize_transaction(raw_transaction: Any) -> Transaction:
-    if not isinstance(raw_transaction, dict):
-        raise GhostChainsValidationError("Each transaction must be an object")
+logger = logging.getLogger(__name__)
 
-    required_fields = {"txId", "fromUserId", "toUserId", "amount", "createdAt"}
-    missing_fields = required_fields - set(raw_transaction)
-    if missing_fields:
-        missing = ", ".join(sorted(missing_fields))
-        raise GhostChainsValidationError(f"Missing required transaction field(s): {missing}")
 
-    tx_id = raw_transaction["txId"]
-    from_user_id = raw_transaction["fromUserId"]
-    to_user_id = raw_transaction["toUserId"]
-    amount = raw_transaction["amount"]
-    created_at_raw = raw_transaction["createdAt"]
-    ip_address = raw_transaction.get("ipAddress")
-    device_id = raw_transaction.get("deviceId")
+LOOKBACK = timedelta(hours=24)
 
-    if not isinstance(tx_id, str) or not tx_id:
-        raise GhostChainsValidationError("transactions[].txId must be a non-empty string")
-    if not isinstance(from_user_id, str) or not from_user_id:
-        raise GhostChainsValidationError("transactions[].fromUserId must be a non-empty string")
-    if not isinstance(to_user_id, str) or not to_user_id:
-        raise GhostChainsValidationError("transactions[].toUserId must be a non-empty string")
-    if not isinstance(amount, (int, float)) or isinstance(amount, bool):
-        raise GhostChainsValidationError("transactions[].amount must be numeric")
-    if math.isnan(amount) or math.isinf(amount):
-        raise GhostChainsValidationError("transactions[].amount must be finite")
-    if not isinstance(created_at_raw, str):
-        raise GhostChainsValidationError("transactions[].createdAt must be an ISO-8601 string")
-    if ip_address is not None and not isinstance(ip_address, str):
-        raise GhostChainsValidationError("transactions[].ipAddress must be a string when present")
-    if device_id is not None and not isinstance(device_id, str):
-        raise GhostChainsValidationError("transactions[].deviceId must be a string when present")
 
-    return Transaction(
-        tx_id=tx_id,
-        from_user_id=from_user_id,
-        to_user_id=to_user_id,
-        amount=float(amount),
-        created_at=parse_iso8601(created_at_raw),
-        ip_address=ip_address,
-        device_id=device_id,
-    )
+DECAY = 0.55
+MAX_DEPTH = 6
+MAX_VISIT = 2000
+
+
+W_NEW_PAIR = 1.0
+W_EXTRA_ROUTE = 3.0
+W_FAN = 0.35
+W_CYCLE = 12.0
+CYCLE_REINFORCEMENT = 1.0
+REPEAT_EDGE_DAMPING = 0.35
+TEMPORAL_FLOOR = 0.75
+
+
+# Scores are relative ranks, so the mass -> [0,1) map must stay strictly
+# increasing. A map that flattens to 1.0 would tie every busy transaction
+# together and destroy the ranking on dense streams.
+SATURATION = 4.0
+TAIL = 0.7
+
+
+_DECAY_POW = [DECAY ** i for i in range(MAX_DEPTH * 2 + 4)]
+
+
+
+
+def _parse_ts(value):
+   if value is None:
+       return None
+   text = str(value).strip()
+   if text.endswith(("Z", "z")):
+       text = text[:-1] + "+00:00"
+   try:
+       parsed = datetime.fromisoformat(text)
+   except ValueError:
+       return None
+   if parsed.tzinfo is None:
+       parsed = parsed.replace(tzinfo=timezone.utc)
+   return parsed.astimezone(timezone.utc)
+
+
+
+
+def _fingerprint(tx):
+   return (
+       str(tx.get("fromUserId")),
+       str(tx.get("toUserId")),
+       repr(tx.get("amount")),
+       str(tx.get("createdAt")),
+   )
+
+
 
 
 class GhostChainsService:
-    def __init__(self) -> None:
-        self.reset()
-
-    def reset(self) -> None:
-        self._processed_order: deque[StoredTransaction] = deque()
-        self._results_by_tx_id: dict[str, float] = {}
-        self._payload_signature_by_tx_id: dict[str, str] = {}
-        self._max_created_at_seen = -math.inf
-
-    def health(self) -> dict[str, str]:
-        return {"status": "ok"}
-
-    def clear(self, payload: Any) -> dict[str, bool]:
-        if not isinstance(payload, dict) or payload.get("clearTransactions") is not True:
-            raise GhostChainsValidationError("Request body must be {\"clearTransactions\": true}")
-        self.reset()
-        return {"clearTransactions": True}
-
-    def process_transactions(self, payload: Any) -> dict[str, list[dict[str, Any]]]:
-        if not isinstance(payload, dict):
-            raise GhostChainsValidationError("Request body must be a JSON object")
-
-        raw_transactions = payload.get("transactions")
-        if not isinstance(raw_transactions, list):
-            raise GhostChainsValidationError("transactions must be an array")
-
-        results: list[dict[str, Any]] = []
-        for raw_transaction in raw_transactions:
-            transaction = normalize_transaction(raw_transaction)
-            signature = self._signature(transaction)
-
-            existing_score = self._results_by_tx_id.get(transaction.tx_id)
-            if existing_score is not None:
-                results.append({"txId": transaction.tx_id, "riskScore": existing_score})
-                continue
-
-            risk_score = self._score_transaction(transaction)
-            stored = StoredTransaction(transaction=transaction, risk_score=risk_score)
-            self._processed_order.append(stored)
-            self._results_by_tx_id[transaction.tx_id] = risk_score
-            self._payload_signature_by_tx_id[transaction.tx_id] = signature
-            self._max_created_at_seen = max(self._max_created_at_seen, transaction.created_at)
-            self._prune_storage()
-
-            results.append({"txId": transaction.tx_id, "riskScore": risk_score})
-
-        return {"transactions": results}
-
-    def _score_transaction(self, transaction: Transaction) -> float:
-        if transaction.from_user_id == transaction.to_user_id:
-            return 0.0
-
-        prior_transactions = self._active_prior_transactions(transaction.created_at)
-        if not prior_transactions:
-            return 0.0
-
-        adjacency = _build_adjacency(prior_transactions)
-        reverse_adjacency = _build_reverse_adjacency(prior_transactions)
-        existing_neighbors = adjacency.get(transaction.from_user_id, set())
-        if transaction.to_user_id in existing_neighbors:
-            return self._score_repeat_edge(transaction, prior_transactions, adjacency, reverse_adjacency)
-
-        reverse_distances_to_u = _bfs_distances(transaction.from_user_id, reverse_adjacency)
-        forward_distances_from_v = _bfs_distances(transaction.to_user_id, adjacency)
-        forward_distance_cache: dict[str, dict[str, int]] = {}
-
-        new_reachability_pairs = 0
-        new_reachability_compactness = 0.0
-        shortened_path_gain = 0.0
-        alternative_path_pairs = 0
-        alternative_shortest_pairs = 0
-
-        for ancestor, distance_to_u in reverse_distances_to_u.items():
-            forward_distances = forward_distance_cache.setdefault(
-                ancestor,
-                _bfs_distances(ancestor, adjacency),
-            )
-            for descendant, distance_from_v in forward_distances_from_v.items():
-                candidate_distance = distance_to_u + 1 + distance_from_v
-                old_distance = forward_distances.get(descendant)
-
-                if old_distance is None:
-                    new_reachability_pairs += 1
-                    new_reachability_compactness += 1.0 / candidate_distance
-                    continue
-
-                if candidate_distance < old_distance:
-                    shortened_path_gain += old_distance - candidate_distance
-                    continue
-
-                alternative_path_pairs += 1
-                if candidate_distance == old_distance:
-                    alternative_shortest_pairs += 1
-
-        closes_return_path = transaction.from_user_id in forward_distances_from_v
-        cycle_component_size = 0
-        cycle_compactness = 0.0
-        scc_growth = 0
-        if closes_return_path:
-            cycle_nodes = set(reverse_distances_to_u) & set(forward_distances_from_v)
-            cycle_component_size = len(cycle_nodes)
-            cycle_length = forward_distances_from_v[transaction.from_user_id] + 1
-            cycle_compactness = cycle_component_size / cycle_length
-            scc_growth = max(
-                0,
-                cycle_component_size
-                - max(
-                    _scc_size(transaction.from_user_id, adjacency, reverse_adjacency),
-                    _scc_size(transaction.to_user_id, adjacency, reverse_adjacency),
-                ),
-            )
-
-        if (
-            new_reachability_pairs == 0
-            and shortened_path_gain <= EPS
-            and alternative_path_pairs == 0
-            and scc_growth == 0
-        ):
-            return 0.0
-
-        raw_score = (
-            0.16 * math.log1p(new_reachability_pairs)
-            + 0.18 * math.log1p(new_reachability_compactness)
-            + 0.34 * math.log1p(shortened_path_gain)
-            + 0.18 * math.log1p(alternative_path_pairs)
-            + 0.45 * math.log1p(alternative_shortest_pairs)
-            + 0.45 * math.log1p(scc_growth)
-            + 0.40 * math.log1p(max(0, cycle_component_size - 1))
-            + 0.28 * cycle_compactness
-        )
-        score = 1.0 - math.exp(-raw_score / 1.9)
-        return round(max(0.0, min(1.0, score)), 6)
-
-    def _score_repeat_edge(
-        self,
-        transaction: Transaction,
-        prior_transactions: list[Transaction],
-        adjacency: dict[str, set[str]],
-        reverse_adjacency: dict[str, set[str]],
-    ) -> float:
-        repeat_count = sum(
-            1
-            for prior in prior_transactions
-            if prior.from_user_id == transaction.from_user_id
-            and prior.to_user_id == transaction.to_user_id
-        )
-
-        forward_distances_from_v = _bfs_distances(transaction.to_user_id, adjacency)
-        closes_return_path = transaction.from_user_id in forward_distances_from_v
-
-        cycle_component_size = 0
-        cycle_compactness = 0.0
-        if closes_return_path:
-            reverse_distances_to_u = _bfs_distances(transaction.from_user_id, reverse_adjacency)
-            cycle_nodes = set(reverse_distances_to_u) & set(forward_distances_from_v)
-            cycle_component_size = len(cycle_nodes)
-            cycle_length = forward_distances_from_v[transaction.from_user_id] + 1
-            cycle_compactness = cycle_component_size / cycle_length
-
-        raw_score = (
-            REPEAT_EDGE_WEIGHT * math.log1p(repeat_count)
-            + 0.40 * math.log1p(max(0, cycle_component_size - 1))
-            + 0.28 * cycle_compactness
-        )
-        score = 1.0 - math.exp(-raw_score / 1.9)
-        return round(max(0.0, min(1.0, score)), 6)
-
-    def _active_prior_transactions(self, created_at: float) -> list[Transaction]:
-        earliest = created_at - LOOKBACK_WINDOW_SECONDS
-        return [
-            stored.transaction
-            for stored in self._processed_order
-            if stored.transaction.created_at >= earliest - EPS
-        ]
-
-    def _prune_storage(self) -> None:
-        if self._max_created_at_seen == -math.inf:
-            return
-
-        threshold = self._max_created_at_seen - LOOKBACK_WINDOW_SECONDS
-        retained: deque[StoredTransaction] = deque()
-        for stored in self._processed_order:
-            if stored.transaction.created_at >= threshold - EPS:
-                retained.append(stored)
-            else:
-                tx_id = stored.transaction.tx_id
-                self._results_by_tx_id.pop(tx_id, None)
-                self._payload_signature_by_tx_id.pop(tx_id, None)
-        self._processed_order = retained
-
-    def _signature(self, transaction: Transaction) -> str:
-        normalized = {
-            "txId": transaction.tx_id,
-            "fromUserId": transaction.from_user_id,
-            "toUserId": transaction.to_user_id,
-            "amount": transaction.amount,
-            "createdAt": transaction.created_at,
-            "ipAddress": transaction.ip_address,
-            "deviceId": transaction.device_id,
-        }
-        return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+   def __init__(self):
+       self._lock = threading.RLock()
+       self.reset()
 
 
-def _build_adjacency(transactions: list[Transaction]) -> dict[str, set[str]]:
-    adjacency: dict[str, set[str]] = {}
-    for transaction in transactions:
-        adjacency.setdefault(transaction.from_user_id, set()).add(transaction.to_user_id)
-        adjacency.setdefault(transaction.to_user_id, set())
-    return adjacency
+   def reset(self):
+       with self._lock:
+           self._adj = defaultdict(set)
+           self._rev = defaultdict(set)
+           self._edge_times = {}
+           self._expiry = []
+           self._active = {}
+           self._scores = {}
+           self._fingerprints = {}
+           self._clock = None
 
 
-def _build_reverse_adjacency(transactions: list[Transaction]) -> dict[str, set[str]]:
-    reverse_adjacency: dict[str, set[str]] = {}
-    for transaction in transactions:
-        reverse_adjacency.setdefault(transaction.to_user_id, set()).add(transaction.from_user_id)
-        reverse_adjacency.setdefault(transaction.from_user_id, set())
-    return reverse_adjacency
+   def health(self):
+       return {"status": "ok"}
 
 
-def _reachable_nodes(start: str, adjacency: dict[str, set[str]]) -> set[str]:
-    seen: set[str] = {start}
-    stack = [start]
-
-    while stack:
-        current = stack.pop()
-        for neighbor in adjacency.get(current, set()):
-            if neighbor not in seen:
-                seen.add(neighbor)
-                stack.append(neighbor)
-
-    return seen
+   def process_batch(self, transactions):
+       with self._lock:
+           return [self._process_one(raw) for raw in transactions]
 
 
-def _reverse_reachable_nodes(start: str, reverse_adjacency: dict[str, set[str]]) -> set[str]:
-    seen: set[str] = {start}
-    stack = [start]
-
-    while stack:
-        current = stack.pop()
-        for neighbor in reverse_adjacency.get(current, set()):
-            if neighbor not in seen:
-                seen.add(neighbor)
-                stack.append(neighbor)
-
-    return seen
+   def _add_edge(self, src, dst, created):
+       self._adj[src].add(dst)
+       self._rev[dst].add(src)
+       times = self._edge_times.get((src, dst))
+       if times is None:
+           self._edge_times[(src, dst)] = [created]
+       else:
+           bisect.insort(times, created)
 
 
-def _bfs_distances(start: str, adjacency: dict[str, set[str]]) -> dict[str, int]:
-    distances: dict[str, int] = {start: 0}
-    queue = deque([start])
+   def _drop_edge(self, src, dst, created):
+       times = self._edge_times.get((src, dst))
+       if times is None:
+           return
+       index = bisect.bisect_left(times, created)
+       if index < len(times) and times[index] == created:
+           times.pop(index)
+       if times:
+           return
+       del self._edge_times[(src, dst)]
+       self._adj[src].discard(dst)
+       if not self._adj[src]:
+           del self._adj[src]
+       self._rev[dst].discard(src)
+       if not self._rev[dst]:
+           del self._rev[dst]
 
-    while queue:
-        current = queue.popleft()
-        next_distance = distances[current] + 1
-        for neighbor in adjacency.get(current, set()):
-            if neighbor not in distances:
-                distances[neighbor] = next_distance
-                queue.append(neighbor)
 
-    return distances
+   def _expire(self, now):
+       """Drop every transaction that is no longer inside the 24h window.
 
 
-def _scc_size(node: str, adjacency: dict[str, set[str]], reverse_adjacency: dict[str, set[str]]) -> int:
-    return len(_reachable_nodes(node, adjacency) & _reverse_reachable_nodes(node, reverse_adjacency))
+       Active means age < 24h, so an edge that has just reached exactly 24h
+       is already gone and cannot contribute to the score being computed.
+       """
+       cutoff = now - LOOKBACK
+       while self._expiry and self._expiry[0][0] <= cutoff:
+           created, tx_id = heapq.heappop(self._expiry)
+           edge = self._active.pop(tx_id, None)
+           if edge is not None:
+               self._drop_edge(edge[0], edge[1], created)
+
+
+   def _walk(self, graph, start, limit=MAX_DEPTH):
+       """Depth-limited BFS. Also reports whether start is reachable from itself."""
+       dist = {start: 0}
+       loops_back = False
+       frontier = [start]
+       depth = 0
+       while frontier and depth < limit:
+           depth += 1
+           nxt = []
+           for node in frontier:
+               for peer in graph.get(node, ()):
+                   if peer == start:
+                       loops_back = True
+                   if peer in dist:
+                       continue
+                   dist[peer] = depth
+                   nxt.append(peer)
+                   if len(dist) >= MAX_VISIT:
+                       return dist, loops_back
+           frontier = nxt
+       return dist, loops_back
+
+
+   def _oldest_edge_within(self, nodes):
+       oldest = None
+       for src in sorted(nodes):
+           for dst in self._adj.get(src, ()):
+               if dst not in nodes:
+                   continue
+               first = self._edge_times[(src, dst)][0]
+               if oldest is None or first < oldest:
+                   oldest = first
+       return oldest
+
+
+   def _score(self, src, dst, created):
+       upstream, src_looped = self._walk(self._rev, src)
+       downstream, dst_looped = self._walk(self._adj, dst)
+       src_reaches, _ = self._walk(self._adj, src)
+       reaches_dst, _ = self._walk(self._rev, dst)
+
+
+       already_linked = dst in src_reaches
+
+
+       total_in = extra_in = 0.0
+       for node, depth in upstream.items():
+           weight = _DECAY_POW[depth]
+           total_in += weight
+           if node in reaches_dst:
+               extra_in += weight
+
+
+       total_out = extra_out = 0.0
+       for node, depth in downstream.items():
+           weight = _DECAY_POW[depth]
+           total_out += weight
+           if node in src_reaches:
+               extra_out += weight
+
+
+       every_pair = DECAY * total_in * total_out
+       fresh_pairs = DECAY * (total_in - extra_in) * (total_out - extra_out)
+       extra_routes = every_pair - fresh_pairs
+       # The edge's own (src, dst) pair is the edge itself, not a path it enables.
+       if already_linked:
+           extra_routes -= DECAY
+       else:
+           fresh_pairs -= DECAY
+       fresh_pairs = max(0.0, fresh_pairs)
+       extra_routes = max(0.0, extra_routes)
+
+
+       cycle_nodes = set()
+       cycle_mass = 0.0
+       for node, depth in upstream.items():
+           back = downstream.get(node)
+           if back is None:
+               continue
+           cycle_nodes.add(node)
+           cycle_mass += _DECAY_POW[min(depth + 1 + back, len(_DECAY_POW) - 1)]
+
+
+       if src_looped or dst_looped:
+           cycle_mass *= 1.0 + CYCLE_REINFORCEMENT
+
+
+       # A destination several parties already pay into, or a source already
+       # paying several parties, is a gathering point. Without this such a
+       # transfer ties at exactly 0.0 with two strangers transacting once.
+       in_peers = len(self._rev.get(dst, ())) - (1 if src in self._rev.get(dst, ()) else 0)
+       out_peers = len(self._adj.get(src, ())) - (1 if dst in self._adj.get(src, ()) else 0)
+       fan = (1.0 - DECAY ** in_peers) + (1.0 - DECAY ** out_peers)
+
+
+       damping = REPEAT_EDGE_DAMPING if (src, dst) in self._edge_times else 1.0
+       mass = (
+           W_NEW_PAIR * fresh_pairs * damping
+           + W_EXTRA_ROUTE * extra_routes * damping
+           + W_FAN * fan
+           + W_CYCLE * cycle_mass
+       )
+
+
+       if cycle_nodes:
+           mass *= self._temporal_factor(cycle_nodes, created)
+
+
+       if mass <= 0.0:
+           return 0.0
+       return round(1.0 - (1.0 + mass / SATURATION) ** -TAIL, 9)
+
+
+   def _temporal_factor(self, nodes, created):
+       oldest = self._oldest_edge_within(nodes)
+       if oldest is None:
+           return 1.0
+       span = (created - oldest).total_seconds()
+       if span <= 0:
+           return 1.0
+       share = min(1.0, span / LOOKBACK.total_seconds())
+       return 1.0 - (1.0 - TEMPORAL_FLOOR) * share
+
+
+   def _process_one(self, raw):
+       if not isinstance(raw, dict):
+           return {"txId": None, "riskScore": 0.0}
+
+
+       tx_id = raw.get("txId")
+       if tx_id is None:
+           return {"txId": None, "riskScore": 0.0}
+
+
+       previous = self._scores.get(tx_id)
+       if previous is not None:
+           if self._fingerprints.get(tx_id) != _fingerprint(raw):
+               logger.warning("duplicate txId %s with a different payload", tx_id)
+           return {"txId": tx_id, "riskScore": previous}
+
+
+       src = raw.get("fromUserId")
+       dst = raw.get("toUserId")
+       if src is None or dst is None:
+           return {"txId": tx_id, "riskScore": 0.0}
+       src, dst = str(src), str(dst)
+
+
+       created = _parse_ts(raw.get("createdAt")) or self._clock
+       if created is None:
+           created = datetime.now(timezone.utc)
+       if self._clock is None or created > self._clock:
+           self._clock = created
+
+
+       # Prune against the newest time the stream has reached, so nothing older
+       # than 24h can survive in the graph regardless of arrival order.
+       self._expire(self._clock)
+
+
+       # A transfer to oneself carries no laundering signal, and left
+       # unguarded it trivially satisfies the "reaches itself" cycle check
+       # below (the walk always contains its own start node), which would
+       # score every self-transfer as a false-positive cycle.
+       if src == dst:
+           score = 0.0
+       else:
+           score = self._score(src, dst, created)
+
+
+       # A transaction that is itself already outside the window is scored but
+       # must not enter the graph, or it would outlive its own 24h lifetime.
+       # Self-loops are also kept out of the graph entirely: a self-loop edge
+       # would make future _walk() calls from this node see peer == start on
+       # their very first hop, spuriously flagging src_looped/dst_looped and
+       # inflating unrelated later scores through CYCLE_REINFORCEMENT.
+       if created > self._clock - LOOKBACK and src != dst:
+           self._add_edge(src, dst, created)
+           heapq.heappush(self._expiry, (created, tx_id))
+           self._active[tx_id] = (src, dst)
+
+
+       self._scores[tx_id] = score
+       self._fingerprints[tx_id] = _fingerprint(raw)
+       return {"txId": tx_id, "riskScore": score}
+
+
+
+
+ENGINE = GhostChainsService()
