@@ -1,23 +1,37 @@
 """Time Travelling Stonks Man -- buy low, sell high, get home to 2037."""
 
+import time
+
 HOME = 2037
+
+# _beam_trips' candidate-path generation is O(years^2 * stocks) per beam
+# state, repeated across 14 rounds and up to 18 beam states -- with enough
+# distinct years in the timeline and a generous energy budget that blows up
+# to tens of seconds per case, which a request-level batch of test cases
+# turns into an upstream timeout (observed as a 502 from the Render proxy)
+# well before any HTTP-server-side timeout would trip. A wall-clock deadline
+# bounds worst-case latency regardless of input shape: the search just
+# returns whatever best-so-far it has (always replay-validated below), which
+# is strictly better than not responding at all.
+REQUEST_BUDGET_SECONDS = 5.0
 
 
 def solve_all(payload):
+    deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
     if isinstance(payload, dict):
-        return [solve_one(payload)]
+        return [solve_one(payload, deadline)]
     if not isinstance(payload, list):
         raise ValueError("JSON array required")
     out = []
     for case in payload:
         try:
-            out.append(solve_one(case))
+            out.append(solve_one(case, deadline))
         except (TypeError, ValueError, KeyError, ZeroDivisionError):
             out.append([])
     return out
 
 
-def solve_one(case):
+def solve_one(case, deadline=None):
     if not isinstance(case, dict):
         raise ValueError("case must be an object")
     energy = _int(case.get("energy"), 0)
@@ -25,14 +39,16 @@ def solve_one(case):
     timeline = _timeline(case.get("timeline"))
     if energy < 2 or capital <= 0 or not timeline:
         return []
+    if deadline is None:
+        deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
 
     seed = {"energy": energy, "capital": capital, "timeline": timeline}
     best_actions = []
     best_profit = -1
     for acts in (
-        _beam_trips(seed),
-        _oscillate_pairs(seed),
-        _pair_trades(seed),
+        _beam_trips(seed, deadline),
+        _oscillate_pairs(seed, deadline),
+        _pair_trades(seed, deadline),
     ):
         profit = _replay(seed, acts)
         if profit is not None and profit > best_profit:
@@ -85,7 +101,7 @@ def _copy_qty(qty):
     return {year: dict(left) for year, left in qty.items()}
 
 
-def _beam_trips(seed):
+def _beam_trips(seed, deadline=None):
     timeline = seed["timeline"]
     years = sorted(y for y in timeline if y <= HOME)
     if HOME not in years:
@@ -99,13 +115,23 @@ def _beam_trips(seed):
     for _ in range(14):
         nxt = []
         seen = set()
+        out_of_time = False
         for energy, capital, qty, holdings, prefix in beam:
-            profit = _replay(seed, prefix)
-            if profit is not None and profit > best_profit:
-                best_profit = profit
-                best_actions = prefix
+            if out_of_time:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                out_of_time = True
+                break
             farthest = HOME - energy // 2
-            for path in _candidate_paths(years, farthest, energy):
+            for path_idx, path in enumerate(_candidate_paths(years, farthest, energy)):
+                # A single state's candidate list can itself run into the
+                # hundreds/thousands for a wide timeline, each costing an
+                # O(len(path)^2 * stocks) _walk call, so poll for the
+                # deadline here too (not just once per state) -- but not on
+                # every iteration, since time.monotonic() isn't free either.
+                if path_idx % 32 == 0 and deadline is not None and time.monotonic() >= deadline:
+                    out_of_time = True
+                    break
                 acts, new_cap, new_qty, new_hold = _walk(
                     path, capital, qty, holdings, timeline
                 )
@@ -113,14 +139,24 @@ def _beam_trips(seed):
                 if not acts or new_cap <= capital or cost > energy:
                     continue
                 trial = prefix + acts
-                if _replay(seed, trial) is None:
+                # Score every fully-built candidate the instant it exists,
+                # rather than waiting for it to be "promoted" to best_actions
+                # when a later round happens to process it as a beam state --
+                # a deadline (or the round/beam-width caps below) can stop
+                # that promotion from ever happening, which would silently
+                # discard an already-valid, already-profitable trial.
+                trial_profit = _replay(seed, trial)
+                if trial_profit is None:
                     continue
+                if trial_profit > best_profit:
+                    best_profit = trial_profit
+                    best_actions = trial
                 key = (energy - cost, new_cap, _qty_key(new_qty), tuple(sorted(new_hold.items())))
                 if key in seen:
                     continue
                 seen.add(key)
                 nxt.append((energy - cost, new_cap, new_qty, new_hold, trial))
-        if not nxt:
+        if out_of_time or not nxt:
             break
         nxt.sort(key=lambda st: (st[1], st[0]), reverse=True)
         beam = nxt[:18]
@@ -205,7 +241,7 @@ def _walk(path, capital, qty, holdings, timeline):
                 capital += have * now
                 holdings[stock] = 0
 
-        ranked = []
+        candidates = []
         for stock, info in here.items():
             avail = qty.get(year, {}).get(stock, 0)
             buy_price = info["price"]
@@ -214,20 +250,14 @@ def _walk(path, capital, qty, holdings, timeline):
             best_price, peak = _best_future(timeline, path, i + 1, stock)
             if peak is None or best_price <= buy_price:
                 continue
-            roi = best_price / buy_price
-            if _better_future_buy(path, i, peak, roi, qty, timeline):
-                continue
             soak = _cheaper_soak(path, i, peak, stock, buy_price, qty, timeline)
             spend = max(0, capital - soak)
             take = min(avail, spend // buy_price)
             if take <= 0:
                 continue
-            ranked.append((roi, -peak, best_price - buy_price, stock, buy_price, take))
-        ranked.sort(reverse=True)
-        for _roi, _peak, _edge, stock, buy_price, take in ranked:
-            take = min(take, qty[year][stock], capital // buy_price)
-            if take <= 0:
-                continue
+            candidates.append((stock, buy_price, best_price - buy_price, take))
+        for stock, take in _allocate_buys(candidates, capital).items():
+            buy_price = here[stock]["price"]
             ops[i].append(("b", stock, take))
             capital -= take * buy_price
             holdings[stock] = holdings.get(stock, 0) + take
@@ -280,28 +310,102 @@ def _cheaper_soak(path, i, peak, stock, buy_price, qty, timeline):
     return soak
 
 
-def _better_future_buy(path, i, peak, roi, qty, timeline):
-    for k in range(i + 1, peak):
-        year = path[k]
-        for name, info in timeline.get(year, {}).items():
-            avail = qty.get(year, {}).get(name, 0)
-            buy_price = info["price"]
-            if avail <= 0:
-                continue
-            best_price, later_peak = _best_future(timeline, path, k + 1, name)
-            if later_peak is None or best_price <= buy_price:
-                continue
-            if best_price / buy_price > roi + 1e-12:
-                return True
-    return False
+_KNAPSACK_CAP_LIMIT = 2000
+_KNAPSACK_MAX_CANDIDATES = 8
 
 
-def _oscillate_pairs(seed):
+def _allocate_buys(candidates, capital):
+    """Choose how many units of each candidate stock to buy at one visit.
+
+    candidates: (stock, buy_price, profit_per_unit, max_take) tuples, all
+    already independently profitable. Multiple candidates compete for the
+    same capital, so picking the single best-ROI-ratio stock first and
+    filling it to its max (the previous approach) is the fractional-knapsack
+    rule -- it is only exact when capital doesn't bind. Here each stock's
+    units are a bounded 0/1 choice at a shared price, i.e. a genuine bounded
+    knapsack, so ROI-ratio-first can strictly underperform (verified: it
+    maxes out the higher-ratio stock and leaves the higher-absolute-profit
+    one underfunded, when splitting capital across both beats maxing either
+    one alone).
+
+    Solved exactly via a DP over capital when the decision space is cheap
+    enough to be worth it (this runs inside the beam search's hot _walk
+    loop, so it must stay cheap on the overwhelmingly common case of 0 or 1
+    candidates, where there's no allocation decision to make anyway).
+    Falls back to the ROI-ratio greedy otherwise -- which remains exact in
+    the capital-abundant limit, and is only ever a heuristic when capital
+    is genuinely the binding constraint across several competing stocks.
+    """
+    if not candidates:
+        return {}
+    if len(candidates) == 1:
+        stock, price, _profit, take = candidates[0]
+        take = min(take, capital // price)
+        return {stock: take} if take > 0 else {}
+
+    total_spend = sum(price * take for _, price, _, take in candidates)
+    cap = min(capital, total_spend)
+    if cap <= 0:
+        return {}
+    if cap > _KNAPSACK_CAP_LIMIT or len(candidates) > _KNAPSACK_MAX_CANDIDATES:
+        return _greedy_allocate_buys(candidates, capital)
+
+    # Binary-split each stock's bounded 0..max_take choice into O(log
+    # max_take) 0/1 lots (clamping max_take to what cap could ever afford,
+    # so a huge qty on a cheap stock doesn't blow up the split count) so a
+    # standard 0/1 knapsack DP can solve this exactly.
+    items = []  # (cost, value, stock, units)
+    for stock, price, profit, max_take in candidates:
+        remaining = min(max_take, cap // price)
+        chunk = 1
+        while remaining > 0:
+            take = min(chunk, remaining)
+            items.append((price * take, profit * take, stock, take))
+            remaining -= take
+            chunk *= 2
+
+    n = len(items)
+    dp = [[0] * (cap + 1) for _ in range(n + 1)]
+    for idx in range(1, n + 1):
+        cost, value, _, _ = items[idx - 1]
+        row, prev = dp[idx], dp[idx - 1]
+        for c in range(cap + 1):
+            row[c] = prev[c]
+            if cost <= c and prev[c - cost] + value > row[c]:
+                row[c] = prev[c - cost] + value
+
+    allocation = {}
+    c = cap
+    for idx in range(n, 0, -1):
+        if dp[idx][c] != dp[idx - 1][c]:
+            cost, _, stock, take = items[idx - 1]
+            allocation[stock] = allocation.get(stock, 0) + take
+            c -= cost
+    return allocation
+
+
+def _greedy_allocate_buys(candidates, capital):
+    allocation = {}
+    remaining = capital
+    for stock, price, profit, max_take in sorted(
+        candidates, key=lambda c: (c[1] + c[2]) / c[1], reverse=True
+    ):
+        take = min(max_take, remaining // price)
+        if take <= 0:
+            continue
+        allocation[stock] = take
+        remaining -= take * price
+    return allocation
+
+
+def _oscillate_pairs(seed, deadline=None):
     timeline = seed["timeline"]
     best_actions = []
     best_profit = -1
     years = list(timeline)
     for buy_year in years:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         for sell_year in years:
             if buy_year == sell_year:
                 continue
@@ -395,7 +499,7 @@ def _run_oscillation(seed, buy_year, sell_year):
     return actions
 
 
-def _pair_trades(seed):
+def _pair_trades(seed, deadline=None):
     energy = seed["energy"]
     capital = seed["capital"]
     timeline = seed["timeline"]
@@ -447,6 +551,8 @@ def _pair_trades(seed):
         return take
 
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         best = None
         for buy_year, stocks in timeline.items():
             for stock, info in stocks.items():
