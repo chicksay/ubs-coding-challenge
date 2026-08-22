@@ -1,0 +1,15 @@
+{
+  "input": {
+    "start_coordinate": [0, 0],
+    "end_coordinate": [0, 0],
+    "start_time": "2026-06-10T08:30:00Z",
+    "nodes": [[0, 0]],
+    "edges": [],
+    "obstructions": []
+  },
+  "expected_output": {
+    "total_duration_sec": 0,
+    "arrival_time": "2026-06-10T08:30:00Z",
+    "path": []
+  }
+}

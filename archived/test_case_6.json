@@ -1,0 +1,18 @@
+{
+  "input": {
+    "start_coordinate": [0, 0],
+    "end_coordinate": [2, 0],
+    "start_time": "2026-06-10T08:30:00Z",
+    "nodes": [[0, 0], [1, 0], [2, 0]],
+    "edges": [
+      { "edge_id": "e0", "node1": [0, 0], "node2": [1, 0], "base_duration_sec": 10 },
+      { "edge_id": "e1", "node1": [1, 0], "node2": [2, 0], "base_duration_sec": 10 }
+    ],
+    "obstructions": []
+  },
+  "expected_output": {
+    "total_duration_sec": 20,
+    "arrival_time": "2026-06-10T08:30:20Z",
+    "path": ["e0", "e1"]
+  }
+}

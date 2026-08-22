@@ -1,0 +1,99 @@
+# tool-box *SHEET 1 OF 3*
+
+[Skip to the brief](#)
+
+1. [Problem Set 1: What is my name?](#)
+2. [Problem Details](#)
+3. [Answer Criteria](#)
+4. [Problem Set 2: How do numbers work?](#)
+5. [Problem Details](#)
+6. [Answer Criteria](#)
+7. [Problem Set 3: What is this shape?](#)
+8. [Problem Details](#)
+9. [Answer Criteria](#)
+10. [Problem Set 4: Combo Challenge](#)
+11. [Scoring](#)
+12. [Run summary page](#)
+13. [Others](#)
+
+---
+
+# Stage 1 — The Nursery
+
+It is new. It sits up, looks at you, and asks questions, but it knows almost nothing. Right now you are teaching it three things: what it is called, how to count, and how to put its shapes back in the toy box when it is done playing. 
+
+You taught it never to guess. So when it is asked something it cannot do, it comes to you, takes whatever you hand it, and says that. It will not check your work. Even its name will be whatever you give it.
+
+You teach it by building what it reaches for, at `{teamUrl}/mcp`. Each section below is something it will be asked and cannot manage on its own yet.
+
+*Important:* *Tool-box problems uses a multi turn agent with tool use. Help it arrive at an answer. Only the expected answer type will be defined. Expose an mcp as you prefer, you decide the name, description, paramters and outputs of your tool.*
+
+## Problem Set 1: What is my name?
+
+### Problem Details
+*Example:* "What is your name?"
+
+### Answer Criteria
+Acceptable names meet this criteria:
+
+| Length  | *3 to 30 characters*                 |
+| :---    | :---                                 |
+| Allowed | letters, digits, spaces, _ , - , '   |
+| Type    | string                               |
+
+Expected to arrive at:
+A string representing its name
+
+## Problem Set 2: How do numbers work?
+
+### Problem Details
+Possible operators: `[ + , - , * , / ]`
+Operand constraints: integer in the range of -100 to 100
+
+*Example:* "What is 2 + 2?"
+
+### Answer Criteria
+Expected to arrive at:
+A number representing the answer
+
+## Problem Set 3: What is this shape?
+
+Its toys arrive as base64-encoded PNG images. It has to know what it is holding before it can put it away in the right toy box hole.
+
+### Problem Details
+*Example:* "What shape is this?" , with a base64 PNG:
+`iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAIAAAD/gAIDAAAB2ElEQVR4nO3c226CQBRG4U0hKHe+/zNioiaK4IFeNGnStE3mNzO4mVnflReCdnU24iFU8zwbwnwE3g/E0mS+sk6nU8S9VRyzil5Z5/M50Z7fsLLmea6qylboDSurWmepPMcwHWIJiJUy1u12M8eSvl5xniUofQz7vg+/MyvL68rqlX+jQ6wsQenHLAmxBMQqKdbz+VzssTjAl7SylkQsAbEExBIQS0AsAbEExBIQS0AsAbEExBIQS9BYYk3Xmj/3YfIYy8zq+8M8eTT1axsyhgJiCYhlpcea7kk+mM8zVtsk+bvyjJUIsQTEEhBLQKyVx+q6brGzgdXHGoZhsbMByfufQWq73S7WrvKPdTgcYu0q/1gREUtALAGxBMQSEEtArLxiTQ7e6KwmVuvgjc4XL89jFXKONcWe35xjtbHnN89YE1+FheOrsMiu16u6SZ5jGGK73Zqo3FgvIJaAWAJiCYglIJaAWHnFmtx8ntV4/in1l7qpnfw0nEsV5DWGfhBLQCwBsRLHGsfRluLqOtmhsY7H4/ftzWazWFZX1xbm1EHAMUtALAGxfrhcLvY/jll/G8fx9+sYsQSMoRhrv98rm5SLMRQwhgJiCYglIJaAWAJiCYglIJaF+wQjHnMtvKco2QAAAABJRU5ErkJggg==`
+
+### Answer Criteria
+Expected to arrive at:
+Either `rectangle` , `triangle` , or `circle`
+
+## Problem Set 4: Combo Challenge
+
+This challenge requires the agent to orchestrate the previous tools you've built. View the post-run summary to see the details of this challenge.
+
+## Scoring
+
+Eight problems, *12.5 points each, 100 total*.
+
+| *PROBLEM*        | *POINTS*   |
+| :---             | :---       |
+| Name             | 12.5       |
+| Arithmetic Set   | 12.5 x 5   |
+| Shape            | 12.5       |
+| Combo Challenge  | 12.5       |
+| **Total**        | **100**    |
+
+Every problem gets up to *three attempts* and the best one counts. Repetition in your logs is expected.
+
+## Run summary page
+
+Once a run ends, a url to a run summary page will be shared, unique to your team.
+
+How to read your run: [understanding run summary](#)
+
+## Others
+
+Hard Limits on your tools: [limits](#)
+
+Common questions: [qna](#) - If you need help, you can reach out to the the helpful coordinators to get our attention, the challenge developers.

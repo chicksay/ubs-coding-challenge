@@ -1,0 +1,48 @@
+Ghost Chains — Diagnostic Notes & Proposed Fixes
+
+Context & observation
+- Ran a non-destructive replay of the Phase‑1 examples; ranking order is correct for canonical cases.
+- Evaluation reported: STRUCTURAL_DEVIATION: High, TEMPORAL_DEVIATION: High.
+
+Observed example scores (final tx):
+- Example1: 0.000000000
+- Example2: 0.049751093
+- Example3: 0.152311329
+- Example4: 0.564647158
+- Example5: 0.690655806
+
+Likely causes
+1) Weighting/tuning mismatch (Structural)
+   - Constants W_EXTRA_ROUTE, W_CYCLE, W_FAN, SATURATION, TAIL control how mass converts to score.
+   - Reference model likely uses different magnitudes/curvature; medium/complex topologies can be mis-ranked.
+
+2) Search-depth / truncation (Structural)
+   - MAX_DEPTH and MAX_VISIT limit path discovery. Dense graphs may hit MAX_VISIT or cut useful long paths, changing structural mass.
+
+3) Repeat-edge / fan damping (Structural)
+   - REPEAT_EDGE_DAMPING and fan formula may under/over-penalize common topologies relative to the reference.
+
+4) Temporal-factor semantics (Temporal)
+   - _temporal_factor reduces cycle mass linearly toward TEMPORAL_FLOOR; reference may have different shape or opposite direction (reward long-lived cycles).
+   - Edge cases: transactions at exact 24h boundary and out-of-order arrivals — clock/expiry logic uses newest-seen time and expiry if created <= clock - LOOKBACK; inclusive/exclusive handling may mismatch evaluator.
+
+5) Identity handling (Phase 2 tie-in)
+   - _identity_mass uses self._active as truth; if _active isn't perfectly pruned in some arrival orders, identity signals may misfire.
+
+Concrete experiments (non-destructive, scratchpad)
+A) Neutralize temporal weighting: set TEMPORAL_FLOOR = 1.0 or skip temporal multiplier; rerun suite and judge TEMPORAL_DEVIATION.
+B) Increase graph horizon: MAX_DEPTH→8–10, MAX_VISIT→10000; test dense meshes/long chains.
+C) Sweep SATURATION & TAIL: increase SATURATION and/or lower TAIL to spread medium masses; check ranking stability.
+D) Adjust REPEAT_EDGE_DAMPING toward 1.0 and/or alter fan formula; test networks with repeated edges.
+E) Boundary tests: create transactions exactly at created == clock - LOOKBACK and out‑of‑order older arrivals to verify pruning semantics.
+F) Identity robustness: simulate presence→absence trails and out‑of‑order identity-carrying edges to ensure _active syncing is correct.
+
+Recommended next steps (priority)
+1. Run experiments E (boundary) and A (neutralize temporal) — they are quick and isolate TEMPORAL issues.
+2. If temporal fixes help, design a refined temporal schedule (nonlinear or capped reward) and re-evaluate.
+3. Run B and C to address structural truncation/tuning; use targeted dense/long scenarios used by evaluator.
+4. If necessary, expose tuning constants as config for rapid A/B testing during evaluations.
+
+Notes
+- No repository files modified during diagnostics; experiments can be run from a scratch copy (ghost_chains_diag.py used).
+- I can run any experiment above and report results on request.
