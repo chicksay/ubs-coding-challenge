@@ -144,6 +144,9 @@ class GhostChainsService:
         return {"transactions": results}
 
     def _score_transaction(self, transaction: Transaction) -> float:
+        if transaction.from_user_id == transaction.to_user_id:
+            return 0.0
+
         prior_transactions = self._active_prior_transactions(transaction.created_at)
         if not prior_transactions:
             return 0.0
@@ -152,15 +155,7 @@ class GhostChainsService:
         reverse_adjacency = _build_reverse_adjacency(prior_transactions)
         existing_neighbors = adjacency.get(transaction.from_user_id, set())
         if transaction.to_user_id in existing_neighbors:
-            repeat_count = sum(
-                1
-                for prior in prior_transactions
-                if prior.from_user_id == transaction.from_user_id
-                and prior.to_user_id == transaction.to_user_id
-            )
-            raw_score = REPEAT_EDGE_WEIGHT * math.log1p(repeat_count)
-            score = 1.0 - math.exp(-raw_score / 1.9)
-            return round(max(0.0, min(1.0, score)), 6)
+            return self._score_repeat_edge(transaction, prior_transactions, adjacency, reverse_adjacency)
 
         reverse_distances_to_u = _bfs_distances(transaction.from_user_id, reverse_adjacency)
         forward_distances_from_v = _bfs_distances(transaction.to_user_id, adjacency)
@@ -227,6 +222,40 @@ class GhostChainsService:
             + 0.18 * math.log1p(alternative_path_pairs)
             + 0.45 * math.log1p(alternative_shortest_pairs)
             + 0.45 * math.log1p(scc_growth)
+            + 0.40 * math.log1p(max(0, cycle_component_size - 1))
+            + 0.28 * cycle_compactness
+        )
+        score = 1.0 - math.exp(-raw_score / 1.9)
+        return round(max(0.0, min(1.0, score)), 6)
+
+    def _score_repeat_edge(
+        self,
+        transaction: Transaction,
+        prior_transactions: list[Transaction],
+        adjacency: dict[str, set[str]],
+        reverse_adjacency: dict[str, set[str]],
+    ) -> float:
+        repeat_count = sum(
+            1
+            for prior in prior_transactions
+            if prior.from_user_id == transaction.from_user_id
+            and prior.to_user_id == transaction.to_user_id
+        )
+
+        forward_distances_from_v = _bfs_distances(transaction.to_user_id, adjacency)
+        closes_return_path = transaction.from_user_id in forward_distances_from_v
+
+        cycle_component_size = 0
+        cycle_compactness = 0.0
+        if closes_return_path:
+            reverse_distances_to_u = _bfs_distances(transaction.from_user_id, reverse_adjacency)
+            cycle_nodes = set(reverse_distances_to_u) & set(forward_distances_from_v)
+            cycle_component_size = len(cycle_nodes)
+            cycle_length = forward_distances_from_v[transaction.from_user_id] + 1
+            cycle_compactness = cycle_component_size / cycle_length
+
+        raw_score = (
+            REPEAT_EDGE_WEIGHT * math.log1p(repeat_count)
             + 0.40 * math.log1p(max(0, cycle_component_size - 1))
             + 0.28 * cycle_compactness
         )
