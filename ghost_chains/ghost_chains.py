@@ -350,12 +350,14 @@ class GhostChainsService:
        # a=src's reach is already computed as src_reaches; every other
        # ancestor gets its own bounded forward walk.
        fresh_pairs = extra_routes = 0.0
+       reach_by_ancestor = {}
        for node, depth in upstream.items():
            weight = _DECAY_POW[depth]
            if node == src:
                reach = src_reaches
            else:
                reach, _, _ = self._walk(self._adj, node)
+           reach_by_ancestor[node] = reach
            reachable_out = sum(w for d, w in downstream_weight.items() if d in reach)
            fresh_pairs += weight * (total_out - reachable_out)
            extra_routes += weight * reachable_out
@@ -374,37 +376,20 @@ class GhostChainsService:
        # Shortened-path signal (Core Principle: "new or shortened paths").
        # For an already-linked pair (a, d), fresh_pairs/extra_routes above
        # only know a route exists -- not whether this edge made it shorter.
-       # reaches_dst already gives every ancestor's existing distance to dst;
-       # src_reaches gives dst's existing distance from every descendant of
-       # src. If routing through this edge (upstream depth + 1, or 1 +
-       # downstream depth) beats the pair's prior shortest distance, this
-       # transaction collapsed that relationship -- weighted by how much
-       # shorter the new route is, not just that an alternative exists.
+       # Check every bounded ancestor/descendant pair that would route via
+       # this edge; otherwise a shortcut from an upstream ancestor to a
+       # downstream descendant is missed unless one endpoint is src or dst.
        shorten_mass = 0.0
-       existing_src_to_dst = reaches_dst.get(src)
-       if existing_src_to_dst is not None and existing_src_to_dst > 1:
-           saved = existing_src_to_dst - 1
-           shorten_mass += _DECAY_POW[1] * (1.0 - DECAY ** saved)
-       for node, depth in upstream.items():
-           if depth == 0:
-               continue  # src itself, handled above
-           old_dist = reaches_dst.get(node)
-           if old_dist is None:
-               continue
-           new_dist = depth + 1
-           if new_dist < old_dist:
-               saved = old_dist - new_dist
-               shorten_mass += _DECAY_POW[new_dist] * (1.0 - DECAY ** saved)
-       for node, depth in downstream.items():
-           if depth == 0:
-               continue  # dst itself, already covered via src_to_dst above
-           old_dist = src_reaches.get(node)
-           if old_dist is None:
-               continue
-           new_dist = depth + 1
-           if new_dist < old_dist:
-               saved = old_dist - new_dist
-               shorten_mass += _DECAY_POW[new_dist] * (1.0 - DECAY ** saved)
+       for ancestor, upstream_depth in upstream.items():
+           reach = reach_by_ancestor[ancestor]
+           for descendant, downstream_depth in downstream.items():
+               old_dist = reach.get(descendant)
+               if old_dist is None:
+                   continue
+               new_dist = upstream_depth + 1 + downstream_depth
+               if new_dist < old_dist:
+                   saved = old_dist - new_dist
+                   shorten_mass += _DECAY_POW[new_dist] * (1.0 - DECAY ** saved)
 
        cycle_mass = 0.0
        for node, depth in upstream.items():

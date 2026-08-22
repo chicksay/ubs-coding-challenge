@@ -123,6 +123,21 @@ class ShortenedPathTests(unittest.TestCase):
         ])
         self.assertEqual(scores[-1], 0.152311329)
 
+    def test_ancestor_to_descendant_shortcut_gets_shortening_signal(self):
+        # SRC->DST shortens A->D from A->P->Q->R->D to A->SRC->DST->D.
+        # Neither shortened endpoint is exactly the new edge's src or dst, so
+        # endpoint-only shortcut checks miss this broader structural change.
+        scores = _run_chain([
+            ("A", "P"),
+            ("P", "Q"),
+            ("Q", "R"),
+            ("R", "D"),
+            ("A", "SRC"),
+            ("DST", "D"),
+            ("SRC", "DST"),
+        ])
+        self.assertEqual(scores[-1], 0.181902017)
+
 
 class DeepChainCoherenceTests(unittest.TestCase):
     """Structural Consistency requires coherent behavior across structurally
