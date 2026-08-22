@@ -48,6 +48,13 @@ CYCLE_REINFORCEMENT = 1.0
 REPEAT_EDGE_DAMPING = 0.35
 TEMPORAL_FLOOR = 0.75
 
+# Phase 2: identity signal. A shared ipAddress/deviceId is scored relative to
+# where the transaction sits in the graph, not as a standalone rule -- these
+# weights combine additively with the structural mass above.
+W_IDENTITY_REUSE = 2.5
+W_IDENTITY_CONSISTENCY = 0.6
+W_IDENTITY_EVASION = 3.0
+
 
 # Scores are relative ranks, so the mass -> [0,1) map must stay strictly
 # increasing. A map that flattens to 1.0 would tie every busy transaction
@@ -211,7 +218,7 @@ class GhostChainsService:
        return oldest
 
 
-   def _score(self, src, dst, created):
+   def _score(self, src, dst, created, ip, device):
        upstream, src_looped = self._walk(self._rev, src)
        downstream, dst_looped = self._walk(self._adj, dst)
        src_reaches, _ = self._walk(self._adj, src)
@@ -272,11 +279,14 @@ class GhostChainsService:
 
 
        damping = REPEAT_EDGE_DAMPING if (src, dst) in self._edge_times else 1.0
+       local_component = upstream.keys() | downstream.keys() | src_reaches.keys() | reaches_dst.keys()
+       identity_mass = self._identity_mass(src, dst, ip, device, local_component)
        mass = (
            W_NEW_PAIR * fresh_pairs * damping
            + W_EXTRA_ROUTE * extra_routes * damping
            + W_FAN * fan
            + W_CYCLE * cycle_mass
+           + identity_mass
        )
 
 
@@ -288,6 +298,52 @@ class GhostChainsService:
            return 0.0
        return round(1.0 - (1.0 + mass / SATURATION) ** -TAIL, 9)
 
+
+   def _identity_mass(self, src, dst, ip, device, local_component):
+       """Identity signal: ipAddress/deviceId scored relative to where this
+       transaction sits in the active graph, ip and device as independent
+       dimensions. Reuses self._active (already 24h-pruned) as the source of
+       truth, so there is no separate identity index to keep in sync.
+       """
+       local_component = local_component | {src, dst}
+
+       total = 0.0
+       for attr, value in (("ip", ip), ("device", device)):
+           if value is None:
+               # Absence only matters if a direct predecessor into src carried
+               # this attribute -- a dropped trail, not absence in a vacuum.
+               for edge_src, edge_dst, edge_ip, edge_device in self._active.values():
+                   if edge_dst != src:
+                       continue
+                   if (edge_ip if attr == "ip" else edge_device) is not None:
+                       total += W_IDENTITY_EVASION
+                       break
+               continue
+
+           external_users = set()
+           predecessor_match = False
+           successor_match = False
+           for edge_src, edge_dst, edge_ip, edge_device in self._active.values():
+               edge_value = edge_ip if attr == "ip" else edge_device
+               if edge_value != value:
+                   continue
+               if edge_src not in local_component:
+                   external_users.add(edge_src)
+               if edge_dst not in local_component:
+                   external_users.add(edge_dst)
+               if edge_dst == src:
+                   predecessor_match = True
+               if edge_src == dst:
+                   successor_match = True
+
+           if external_users:
+               total += W_IDENTITY_REUSE * (1.0 - DECAY ** len(external_users))
+           if predecessor_match:
+               total += W_IDENTITY_CONSISTENCY
+           if successor_match:
+               total += W_IDENTITY_CONSISTENCY
+
+       return total
 
    def _temporal_factor(self, nodes, created):
        oldest = self._oldest_edge_within(nodes)
@@ -323,6 +379,9 @@ class GhostChainsService:
            return {"txId": tx_id, "riskScore": 0.0}
        src, dst = str(src), str(dst)
 
+       ip = raw.get("ipAddress")
+       device = raw.get("deviceId")
+
 
        created = _parse_ts(raw.get("createdAt")) or self._clock
        if created is None:
@@ -343,7 +402,7 @@ class GhostChainsService:
        if src == dst:
            score = 0.0
        else:
-           score = self._score(src, dst, created)
+           score = self._score(src, dst, created, ip, device)
 
 
        # A transaction that is itself already outside the window is scored but
@@ -355,7 +414,7 @@ class GhostChainsService:
        if created > self._clock - LOOKBACK and src != dst:
            self._add_edge(src, dst, created)
            heapq.heappush(self._expiry, (created, tx_id))
-           self._active[tx_id] = (src, dst)
+           self._active[tx_id] = (src, dst, ip, device)
 
 
        self._scores[tx_id] = score
