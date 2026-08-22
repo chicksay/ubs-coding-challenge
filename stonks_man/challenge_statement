@@ -66,12 +66,12 @@ Format of output
 Nested array, with each sub-array corresponding to a specific test case
 Each sub-array contains a list of actions to execute in sequence
 Each action is made up of 3 segments
-Action Type:
+1. Action Type:
 i. j - Jump
 ii. b - Buy
 iii. s - Sell
-Year-From  |  Stock Name
-Year-To      |  Quantity of Stock
+2. Year-From  |  Stock Name
+3. Year-To      |  Quantity of Stock
 Expected response content type: application/json
 
 Sample calculation of profits

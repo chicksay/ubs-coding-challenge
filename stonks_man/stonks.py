@@ -49,6 +49,7 @@ def solve_one(case, deadline=None):
         _beam_trips(seed, deadline),
         _oscillate_pairs(seed, deadline),
         _pair_trades(seed, deadline),
+        _simple_round_trips(seed, deadline),
     ):
         profit = _replay(seed, acts)
         if profit is not None and profit > best_profit:
@@ -192,6 +193,44 @@ def _candidate_paths(years, farthest, energy):
                 if key not in seen:
                     seen.add(key)
                     paths.append(path)
+    
+    # Additional patterns: multi-arm paths that visit disjoint year groups
+    # e.g., HOME -> y1 -> HOME -> y2 -> HOME (two separate trading windows)
+    sorted_years = sorted([y for y in years if y <= HOME])
+    if len(sorted_years) >= 2:
+        for i in range(len(sorted_years) - 1):
+            for j in range(i + 1, len(sorted_years)):
+                y1, y2 = sorted_years[i], sorted_years[j]
+                # Pattern: visit y1, return, visit y2, return
+                cost = 2 * (HOME - y1) + 2 * (HOME - y2)
+                if cost <= energy:
+                    path = [HOME, y1, HOME, y2, HOME]
+                    key = tuple(path)
+                    if key not in seen:
+                        seen.add(key)
+                        paths.append(path)
+                
+                # Pattern: visit y2 first, then y1
+                path = [HOME, y2, HOME, y1, HOME]
+                key = tuple(path)
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(path)
+        
+        # Three-way splits for enough energy
+        if len(sorted_years) >= 3:
+            for i in range(len(sorted_years) - 2):
+                for j in range(i + 1, len(sorted_years) - 1):
+                    for k in range(j + 1, len(sorted_years)):
+                        y1, y2, y3 = sorted_years[i], sorted_years[j], sorted_years[k]
+                        cost = 2 * (HOME - y1) + 2 * (HOME - y2) + 2 * (HOME - y3)
+                        if cost <= energy:
+                            path = [HOME, y1, HOME, y2, HOME, y3, HOME]
+                            key = tuple(path)
+                            if key not in seen:
+                                seen.add(key)
+                                paths.append(path)
+    
     return paths
 
 
@@ -396,6 +435,94 @@ def _greedy_allocate_buys(candidates, capital):
         allocation[stock] = take
         remaining -= take * price
     return allocation
+
+
+def _simple_round_trips(seed, deadline=None):
+    """Simple exhaustive strategy: try all round-trip buy/sell pairs."""
+    energy = seed["energy"]
+    capital = seed["capital"]
+    timeline = seed["timeline"]
+    best_actions = []
+    best_profit = -1
+    years = sorted(timeline.keys())
+    
+    for buy_year in years:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        for sell_year in years:
+            if buy_year == sell_year or deadline is not None and time.monotonic() >= deadline:
+                continue
+            
+            cost_to_buy = abs(HOME - buy_year)
+            cost_to_sell = abs(buy_year - sell_year)
+            cost_home = abs(sell_year - HOME)
+            total_cost = cost_to_buy + cost_to_sell + cost_home
+            
+            if total_cost > energy:
+                continue
+            
+            qty = _qty_map(timeline)
+            holdings = {}
+            year = HOME
+            actions = []
+            current_capital = capital
+            
+            # Jump to buy year
+            if year != buy_year:
+                actions.append(f"j-{year}-{buy_year}")
+                year = buy_year
+            
+            # Buy stocks with best ROI
+            candidates = []
+            for name, info in timeline[buy_year].items():
+                sell_price = timeline.get(sell_year, {}).get(name, {}).get("price")
+                if sell_price is None or sell_price <= info["price"] or qty[buy_year][name] <= 0:
+                    continue
+                roi = sell_price / info["price"]
+                profit_per_unit = sell_price - info["price"]
+                candidates.append((roi, profit_per_unit, name, info["price"]))
+            
+            if not candidates:
+                continue
+            
+            candidates.sort(reverse=True)
+            bought_any = False
+            for roi, profit_per_unit, name, price in candidates:
+                take = min(qty[buy_year][name], current_capital // price)
+                if take <= 0:
+                    continue
+                actions.append(f"b-{name}-{take}")
+                current_capital -= take * price
+                holdings[name] = take
+                qty[buy_year][name] -= take
+                bought_any = True
+            
+            if not bought_any:
+                continue
+            
+            # Jump to sell year
+            if year != sell_year:
+                actions.append(f"j-{year}-{sell_year}")
+                year = sell_year
+            
+            # Sell all holdings
+            for name, have in holdings.items():
+                price = timeline.get(sell_year, {}).get(name, {}).get("price")
+                if price is not None and have > 0:
+                    actions.append(f"s-{name}-{have}")
+                    current_capital += have * price
+            
+            # Return home
+            if year != HOME:
+                actions.append(f"j-{year}-{HOME}")
+            
+            # Validate and score
+            profit = _replay(seed, actions)
+            if profit is not None and profit > best_profit:
+                best_profit = profit
+                best_actions = actions
+    
+    return best_actions
 
 
 def _oscillate_pairs(seed, deadline=None):
