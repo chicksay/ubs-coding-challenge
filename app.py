@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from adaptive_gateway import transform as adaptive_gateway_transform
+from ghost_chains import GhostChainsService
 from kan_chiong_driver import solve as kan_chiong_solve
 from showdown_bot import choose_action as showdown_choose_action
 
@@ -47,18 +48,49 @@ def _handle_showdown(body):
     return showdown_choose_action(body)
 
 
-ROUTES = {
+GHOST_CHAINS = GhostChainsService()
+
+
+def _handle_ghost_chains_transactions(body):
+    return GHOST_CHAINS.process_transactions(body)
+
+
+def _handle_ghost_chains_clear(body):
+    return GHOST_CHAINS.clear(body)
+
+
+POST_ROUTES = {
     "/kan-cheong-delivery-driver": _handle_kan_chiong,
     "/solve": _handle_adaptive_gateway,
     "/showdown": _handle_showdown,
+    "/ghost-chains/transactions": _handle_ghost_chains_transactions,
+    "/ghost-chains/clear": _handle_ghost_chains_clear,
+}
+
+GET_ROUTES = {
+    "/ghost-chains/health": lambda: GHOST_CHAINS.health(),
 }
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def do_GET(self):
+        handler = GET_ROUTES.get(self.path)
+        if handler is None:
+            self._respond(404, {"error": "not found"})
+            return
+
+        try:
+            result = handler()
+        except Exception as exc:
+            self._respond(400, {"error": str(exc)})
+            return
+
+        self._respond(200, result)
+
     def do_POST(self):
-        handler = ROUTES.get(self.path)
+        handler = POST_ROUTES.get(self.path)
         if handler is None:
             self._respond(404, {"error": "not found"})
             return
@@ -97,7 +129,9 @@ def main():
     port = int(os.environ.get("PORT", 8000))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Listening on http://0.0.0.0:{port}")
-    for path in ROUTES:
+    for path in GET_ROUTES:
+        print(f"  GET  {path}")
+    for path in POST_ROUTES:
         print(f"  POST {path}")
     try:
         server.serve_forever()
