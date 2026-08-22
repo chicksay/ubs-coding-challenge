@@ -52,6 +52,26 @@ DECAY = 0.55
 # MAX_VISIT below still bounds total work per call regardless of depth, so
 # this costs nothing on wide graphs and only helps deep/chain-like ones.
 MAX_DEPTH = 25
+# KNOWN ISSUE, deliberately not fixed: unlike MAX_DEPTH, this is not a case
+# where raising the constant is a clean fix. Every ancestor at a given depth
+# gets the identical DECAY**depth weight with no per-depth saturation, so
+# total_in/total_out grow linearly and unboundedly with fan-in/fan-out width
+# -- there's no natural falloff the way there is with depth, where
+# DECAY**depth itself makes going further stop mattering. Confirmed
+# empirically: a hub with >MAX_VISIT direct senders produces a bit-for-bit
+# identical score no matter how many more senders it gets -- the same
+# "Structural Consistency" failure MAX_DEPTH=6 used to cause on deep chains,
+# just on the width axis. Tried raising this to 5000; reverted, because fix
+# #1 (exact pair reachability) does one bounded walk per ancestor, making
+# this roughly O(MAX_VISIT^2) worst case -- 5000 measured at ~6.9s for a
+# single score (was 0.78s at 2000), a real risk of timing out a service the
+# spec frames as real-time. A correct fix would rescale total_in/total_out to
+# saturate per depth level the way `fan` below already saturates by peer
+# count (1 - DECAY**count) -- a change to every existing weight, not an
+# additive term, so every pinned score in the suite would need re-deriving
+# with no example anywhere near this scale to anchor the new shape against.
+# Left at 2000: an implausible-in-practice edge case (2000+ direct senders
+# into one node) is a better trade than risking real-time latency everywhere.
 MAX_VISIT = 2000
 
 
