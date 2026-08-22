@@ -246,8 +246,15 @@ class GhostChainsService:
             return
 
         threshold = self._max_created_at_seen - LOOKBACK_WINDOW_SECONDS
-        while self._processed_order and self._processed_order[0].transaction.created_at < threshold - EPS:
-            self._processed_order.popleft()
+        retained: deque[StoredTransaction] = deque()
+        for stored in self._processed_order:
+            if stored.transaction.created_at >= threshold - EPS:
+                retained.append(stored)
+            else:
+                tx_id = stored.transaction.tx_id
+                self._results_by_tx_id.pop(tx_id, None)
+                self._payload_signature_by_tx_id.pop(tx_id, None)
+        self._processed_order = retained
 
     def _signature(self, transaction: Transaction) -> str:
         normalized = {
