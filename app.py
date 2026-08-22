@@ -7,6 +7,7 @@ from adaptive_gateway import transform as adaptive_gateway_transform
 from ghost_chains import GhostChainsService
 from kan_chiong_driver import solve as kan_chiong_solve
 from showdown_bot import choose_action as showdown_choose_action
+from stonks_man import solve_all as stonks_solve_all
 
 NULL_RESULT = {"total_duration_sec": None, "arrival_time": None, "path": []}
 
@@ -48,6 +49,10 @@ def _handle_showdown(body):
     return showdown_choose_action(body)
 
 
+def _handle_stonks(body):
+    return stonks_solve_all(body)
+
+
 GHOST_CHAINS = GhostChainsService()
 
 
@@ -65,6 +70,7 @@ POST_ROUTES = {
     "/showdown": _handle_showdown,
     "/ghost-chains/transactions": _handle_ghost_chains_transactions,
     "/ghost-chains/reset": _handle_ghost_chains_reset,
+    "/stonks": _handle_stonks,
 }
 
 GET_ROUTES = {

@@ -1,0 +1,606 @@
+"""Time Travelling Stonks Man -- buy low, sell high, get home to 2037."""
+
+HOME = 2037
+
+
+def solve_all(payload):
+    if isinstance(payload, dict):
+        return [solve_one(payload)]
+    if not isinstance(payload, list):
+        raise ValueError("JSON array required")
+    out = []
+    for case in payload:
+        try:
+            out.append(solve_one(case))
+        except (TypeError, ValueError, KeyError, ZeroDivisionError):
+            out.append([])
+    return out
+
+
+def solve_one(case):
+    if not isinstance(case, dict):
+        raise ValueError("case must be an object")
+    energy = _int(case.get("energy"), 0)
+    capital = _int(case.get("capital"), 0)
+    timeline = _timeline(case.get("timeline"))
+    if energy < 2 or capital <= 0 or not timeline:
+        return []
+
+    seed = {"energy": energy, "capital": capital, "timeline": timeline}
+    best_actions = []
+    best_profit = -1
+    for acts in (
+        _beam_trips(seed),
+        _oscillate_pairs(seed),
+        _pair_trades(seed),
+    ):
+        profit = _replay(seed, acts)
+        if profit is not None and profit > best_profit:
+            best_profit = profit
+            best_actions = acts
+    return best_actions
+
+
+def _int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _timeline(raw):
+    years = {}
+    if not isinstance(raw, dict):
+        return years
+    for year_key, stocks in raw.items():
+        year = _int(year_key, None)
+        if year is None or year <= 0 or year > HOME:
+            continue
+        if not isinstance(stocks, dict):
+            continue
+        bucket = {}
+        for name, info in stocks.items():
+            if not isinstance(info, dict):
+                continue
+            price = _int(info.get("price"), 0)
+            qty = _int(info.get("qty"), 0)
+            if price <= 0:
+                continue
+            bucket[str(name)] = {"price": price, "qty": max(0, qty)}
+        if bucket:
+            years[year] = bucket
+    return years
+
+
+def _price(timeline, year, stock):
+    info = timeline.get(year, {}).get(stock)
+    return None if info is None else info["price"]
+
+
+def _qty_map(timeline):
+    return {year: {name: info["qty"] for name, info in stocks.items()} for year, stocks in timeline.items()}
+
+
+def _copy_qty(qty):
+    return {year: dict(left) for year, left in qty.items()}
+
+
+def _beam_trips(seed):
+    timeline = seed["timeline"]
+    years = sorted(y for y in timeline if y <= HOME)
+    if HOME not in years:
+        years.append(HOME)
+        years.sort()
+
+    beam = [(seed["energy"], seed["capital"], _qty_map(timeline), {}, [])]
+    best_actions = []
+    best_profit = -1
+
+    for _ in range(14):
+        nxt = []
+        seen = set()
+        for energy, capital, qty, holdings, prefix in beam:
+            profit = _replay(seed, prefix)
+            if profit is not None and profit > best_profit:
+                best_profit = profit
+                best_actions = prefix
+            farthest = HOME - energy // 2
+            for path in _candidate_paths(years, farthest, energy):
+                acts, new_cap, new_qty, new_hold = _walk(
+                    path, capital, qty, holdings, timeline
+                )
+                cost = _jump_cost(acts)
+                if not acts or new_cap <= capital or cost > energy:
+                    continue
+                trial = prefix + acts
+                if _replay(seed, trial) is None:
+                    continue
+                key = (energy - cost, new_cap, _qty_key(new_qty), tuple(sorted(new_hold.items())))
+                if key in seen:
+                    continue
+                seen.add(key)
+                nxt.append((energy - cost, new_cap, new_qty, new_hold, trial))
+        if not nxt:
+            break
+        nxt.sort(key=lambda st: (st[1], st[0]), reverse=True)
+        beam = nxt[:18]
+    return _finish(best_actions, {}, timeline)
+
+
+def _qty_key(qty):
+    return tuple(sorted((year, name, left) for year, stocks in qty.items() for name, left in stocks.items() if left))
+
+
+def _candidate_paths(years, farthest, energy):
+    paths = []
+    seen = set()
+    for ymin in years:
+        if ymin < farthest or ymin >= HOME:
+            continue
+        span = [y for y in years if ymin <= y <= HOME]
+        simple = _out_and_back(years, ymin)
+        for path in (simple,):
+            key = tuple(path)
+            if key not in seen and _path_travel(path) <= energy:
+                seen.add(key)
+                paths.append(path)
+        for y_hi in span:
+            if y_hi <= ymin:
+                continue
+            for extra in (1, 2):
+                cost = 2 * (HOME - ymin) + 2 * extra * (y_hi - ymin)
+                if cost > energy:
+                    continue
+                path = _out_zag_back(years, ymin, y_hi, extra)
+                key = tuple(path)
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(path)
+    return paths
+
+
+def _out_and_back(years, ymin):
+    span = [y for y in years if ymin <= y <= HOME]
+    if HOME not in span:
+        span = sorted(span + [HOME])
+    if ymin not in span:
+        span = sorted(span + [ymin])
+    outbound = list(reversed(span))
+    return outbound + span[1:]
+
+
+def _out_zag_back(years, ymin, y_hi, extra):
+    span = [y for y in years if ymin <= y <= HOME]
+    if HOME not in span:
+        span = sorted(span + [HOME])
+    to_hi = [y for y in span if ymin <= y <= y_hi]
+    to_lo = list(reversed(to_hi))
+    path = list(reversed(span))
+    for _ in range(extra):
+        path.extend(to_hi[1:])
+        path.extend(to_lo[1:])
+    path.extend(span[1:])
+    return path
+
+
+def _path_travel(path):
+    return sum(abs(path[i] - path[i - 1]) for i in range(1, len(path)))
+
+
+def _walk(path, capital, qty, holdings, timeline):
+    qty = _copy_qty(qty)
+    holdings = dict(holdings)
+    capital = int(capital)
+    ops = [[] for _ in path]
+
+    for i, year in enumerate(path):
+        here = timeline.get(year, {})
+        for stock, have in list(holdings.items()):
+            if have <= 0 or stock not in here:
+                continue
+            now = here[stock]["price"]
+            future_max = _suffix_max(timeline, path, i + 1, stock)
+            if now >= future_max:
+                ops[i].append(("s", stock, have))
+                capital += have * now
+                holdings[stock] = 0
+
+        ranked = []
+        for stock, info in here.items():
+            avail = qty.get(year, {}).get(stock, 0)
+            buy_price = info["price"]
+            if avail <= 0 or buy_price <= 0:
+                continue
+            best_price, peak = _best_future(timeline, path, i + 1, stock)
+            if peak is None or best_price <= buy_price:
+                continue
+            roi = best_price / buy_price
+            if _better_future_buy(path, i, peak, roi, qty, timeline):
+                continue
+            soak = _cheaper_soak(path, i, peak, stock, buy_price, qty, timeline)
+            spend = max(0, capital - soak)
+            take = min(avail, spend // buy_price)
+            if take <= 0:
+                continue
+            ranked.append((roi, -peak, best_price - buy_price, stock, buy_price, take))
+        ranked.sort(reverse=True)
+        for _roi, _peak, _edge, stock, buy_price, take in ranked:
+            take = min(take, qty[year][stock], capital // buy_price)
+            if take <= 0:
+                continue
+            ops[i].append(("b", stock, take))
+            capital -= take * buy_price
+            holdings[stock] = holdings.get(stock, 0) + take
+            qty[year][stock] -= take
+
+    actions = []
+    current = path[0]
+    for i, year in enumerate(path):
+        if not ops[i] and year != path[-1]:
+            continue
+        if year != current:
+            actions.append(f"j-{current}-{year}")
+            current = year
+        for kind, stock, take in ops[i]:
+            actions.append(f"{kind}-{stock}-{take}")
+    if current != path[-1]:
+        actions.append(f"j-{current}-{path[-1]}")
+    return actions, capital, qty, holdings
+
+
+def _suffix_max(timeline, path, start, stock):
+    best = -1
+    for j in range(start, len(path)):
+        later = _price(timeline, path[j], stock)
+        if later is not None and later > best:
+            best = later
+    return best
+
+
+def _best_future(timeline, path, start, stock):
+    best_price = -1
+    peak = None
+    for j in range(start, len(path)):
+        later = _price(timeline, path[j], stock)
+        if later is not None and later > best_price:
+            best_price = later
+            peak = j
+    return best_price, peak
+
+
+def _cheaper_soak(path, i, peak, stock, buy_price, qty, timeline):
+    soak = 0
+    for k in range(i + 1, peak):
+        later = _price(timeline, path[k], stock)
+        if later is None or later >= buy_price:
+            continue
+        avail = qty.get(path[k], {}).get(stock, 0)
+        if avail > 0:
+            soak += avail * later
+    return soak
+
+
+def _better_future_buy(path, i, peak, roi, qty, timeline):
+    for k in range(i + 1, peak):
+        year = path[k]
+        for name, info in timeline.get(year, {}).items():
+            avail = qty.get(year, {}).get(name, 0)
+            buy_price = info["price"]
+            if avail <= 0:
+                continue
+            best_price, later_peak = _best_future(timeline, path, k + 1, name)
+            if later_peak is None or best_price <= buy_price:
+                continue
+            if best_price / buy_price > roi + 1e-12:
+                return True
+    return False
+
+
+def _oscillate_pairs(seed):
+    timeline = seed["timeline"]
+    best_actions = []
+    best_profit = -1
+    years = list(timeline)
+    for buy_year in years:
+        for sell_year in years:
+            if buy_year == sell_year:
+                continue
+            acts = _run_oscillation(seed, buy_year, sell_year)
+            profit = _replay(seed, acts)
+            if profit is not None and profit > best_profit:
+                best_profit = profit
+                best_actions = acts
+    return best_actions
+
+
+def _run_oscillation(seed, buy_year, sell_year):
+    energy = seed["energy"]
+    capital = seed["capital"]
+    timeline = seed["timeline"]
+    qty = _qty_map(timeline)
+    holdings = {}
+    year = HOME
+    actions = []
+
+    def jump(dest):
+        nonlocal energy, year
+        if dest == year:
+            return
+        energy -= abs(dest - year)
+        actions.append(f"j-{year}-{dest}")
+        year = dest
+
+    def buy_lot(name):
+        nonlocal capital
+        price = _price(timeline, year, name)
+        take = min(qty[year][name], capital // price)
+        if take <= 0:
+            return 0
+        qty[year][name] -= take
+        capital -= take * price
+        holdings[name] = holdings.get(name, 0) + take
+        actions.append(f"b-{name}-{take}")
+        return take
+
+    def sell_lot(name):
+        nonlocal capital
+        price = _price(timeline, year, name)
+        have = holdings.get(name, 0)
+        if price is None or have <= 0:
+            return 0
+        holdings[name] = 0
+        capital += have * price
+        actions.append(f"s-{name}-{have}")
+        return have
+
+    def profitable_names():
+        ranked = []
+        for name, info in timeline.get(buy_year, {}).items():
+            sell_price = _price(timeline, sell_year, name)
+            if sell_price is None or sell_price <= info["price"]:
+                continue
+            if qty[buy_year][name] <= 0:
+                continue
+            ranked.append((sell_price / info["price"], sell_price - info["price"], name))
+        ranked.sort(reverse=True)
+        return [name for _roi, _edge, name in ranked]
+
+    while True:
+        names = profitable_names()
+        if not names:
+            break
+        cheapest = min(timeline[buy_year][name]["price"] for name in names)
+        if capital < cheapest:
+            break
+        to_buy = abs(year - buy_year)
+        to_sell = abs(buy_year - sell_year)
+        to_home = abs(sell_year - HOME)
+        if to_buy + to_sell + to_home > energy:
+            break
+        jump(buy_year)
+        bought = 0
+        for name in names:
+            bought += buy_lot(name)
+        if bought == 0:
+            break
+        jump(sell_year)
+        for name in list(holdings):
+            sell_lot(name)
+
+    if year != HOME:
+        jump(HOME)
+    for name in list(holdings):
+        if _price(timeline, HOME, name) is not None:
+            sell_lot(name)
+    return actions
+
+
+def _pair_trades(seed):
+    energy = seed["energy"]
+    capital = seed["capital"]
+    timeline = seed["timeline"]
+    qty = _qty_map(timeline)
+    holdings = {}
+    year = HOME
+    actions = []
+
+    def can_reach(stops):
+        here = year
+        cost = 0
+        for dest in stops:
+            cost += abs(dest - here)
+            here = dest
+        return cost + abs(HOME - here) <= energy
+
+    def jump(dest):
+        nonlocal energy, year
+        if dest == year:
+            return
+        energy -= abs(dest - year)
+        actions.append(f"j-{year}-{dest}")
+        year = dest
+
+    def buy(stock, take):
+        nonlocal capital
+        price = _price(timeline, year, stock)
+        take = min(take, qty[year][stock], capital // price)
+        if take <= 0:
+            return 0
+        qty[year][stock] -= take
+        capital -= take * price
+        holdings[stock] = holdings.get(stock, 0) + take
+        actions.append(f"b-{stock}-{take}")
+        return take
+
+    def sell(stock, take=None):
+        nonlocal capital
+        price = _price(timeline, year, stock)
+        if price is None:
+            return 0
+        have = holdings.get(stock, 0)
+        take = have if take is None else min(take, have)
+        if take <= 0:
+            return 0
+        holdings[stock] = have - take
+        capital += take * price
+        actions.append(f"s-{stock}-{take}")
+        return take
+
+    while True:
+        best = None
+        for buy_year, stocks in timeline.items():
+            for stock, info in stocks.items():
+                avail = qty[buy_year][stock]
+                buy_price = info["price"]
+                if avail <= 0:
+                    continue
+                for sell_year, other in timeline.items():
+                    sell_price = other.get(stock, {}).get("price")
+                    if sell_price is None or sell_price <= buy_price:
+                        continue
+                    if not can_reach([buy_year, sell_year]):
+                        continue
+                    take = min(avail, capital // buy_price)
+                    if take <= 0:
+                        continue
+                    profit = take * (sell_price - buy_price)
+                    travel = abs(year - buy_year) + abs(buy_year - sell_year)
+                    roi = sell_price / buy_price
+                    score = (roi, profit, -travel)
+                    if best is None or score > best[0]:
+                        best = (score, buy_year, sell_year)
+
+        if best is None:
+            break
+        _score, buy_year, sell_year = best
+        hops = _line_path(year, buy_year, timeline) + _line_path(buy_year, sell_year, timeline)[1:]
+        acts, new_cap, new_qty, new_hold = _walk(hops, capital, qty, holdings, timeline)
+        if not acts or not any(item.startswith("b-") for item in acts):
+            jump(buy_year)
+            ranked = []
+            for name, info in timeline.get(buy_year, {}).items():
+                sell_price = _price(timeline, sell_year, name)
+                if sell_price is None or sell_price <= info["price"] or qty[buy_year][name] <= 0:
+                    continue
+                ranked.append((sell_price / info["price"], name))
+            ranked.sort(reverse=True)
+            bought = 0
+            for _roi, name in ranked:
+                bought += buy(name, qty[buy_year][name])
+            if bought == 0:
+                break
+            jump(sell_year)
+            for name in list(holdings):
+                sell(name)
+            continue
+        used = _jump_cost(acts)
+        if used > energy:
+            break
+        energy -= used
+        actions.extend(acts)
+        capital, qty, holdings = new_cap, new_qty, new_hold
+        year = sell_year if acts else year
+        for action in acts:
+            bits = action.split("-")
+            if bits[0] == "j":
+                year = int(bits[2])
+        for name in list(holdings):
+            if _price(timeline, year, name) is not None:
+                future_home = _price(timeline, HOME, name)
+                now = _price(timeline, year, name)
+                if future_home is None or now >= future_home or not can_reach([HOME]):
+                    sell(name)
+
+    if year != HOME:
+        jump(HOME)
+    for name in list(holdings):
+        if _price(timeline, HOME, name) is not None:
+            sell(name)
+    return actions
+
+
+def _line_path(a, b, timeline):
+    points = sorted(set(timeline) | {a, b})
+    if a <= b:
+        return [y for y in points if a <= y <= b]
+    return [y for y in points if b <= y <= a][::-1]
+
+
+def _finish(actions, holdings, timeline):
+    year = HOME
+    for action in actions:
+        bits = action.split("-")
+        if bits[0] == "j":
+            year = int(bits[2])
+    extra = []
+    if year != HOME:
+        extra.append(f"j-{year}-{HOME}")
+    for name, have in holdings.items():
+        if have > 0 and _price(timeline, HOME, name) is not None:
+            extra.append(f"s-{name}-{have}")
+    return list(actions) + extra
+
+
+def _jump_cost(actions):
+    total = 0
+    for action in actions:
+        bits = action.split("-")
+        if bits[0] == "j":
+            total += abs(int(bits[1]) - int(bits[2]))
+    return total
+
+
+def _replay(seed, actions):
+    try:
+        energy = int(seed["energy"])
+        capital = int(seed["capital"])
+        start = capital
+        timeline = seed["timeline"]
+        qty = _copy_qty(_qty_map(timeline))
+        holdings = {}
+        year = HOME
+        for action in actions:
+            if not isinstance(action, str):
+                return None
+            bits = action.split("-")
+            if len(bits) < 3:
+                return None
+            kind = bits[0]
+            if kind == "j":
+                source, dest = int(bits[1]), int(bits[2])
+                if source != year:
+                    return None
+                cost = abs(dest - source)
+                if cost > energy:
+                    return None
+                energy -= cost
+                year = dest
+                continue
+            name = "-".join(bits[1:-1])
+            take = int(bits[-1])
+            if take <= 0:
+                return None
+            info = timeline.get(year, {}).get(name)
+            if info is None:
+                return None
+            if kind == "b":
+                if qty[year][name] < take:
+                    return None
+                cost = take * info["price"]
+                if cost > capital:
+                    return None
+                capital -= cost
+                qty[year][name] -= take
+                holdings[name] = holdings.get(name, 0) + take
+            elif kind == "s":
+                if holdings.get(name, 0) < take:
+                    return None
+                capital += take * info["price"]
+                holdings[name] -= take
+            else:
+                return None
+        if year != HOME:
+            return None
+        return capital - start
+    except (TypeError, ValueError, KeyError):
+        return None
