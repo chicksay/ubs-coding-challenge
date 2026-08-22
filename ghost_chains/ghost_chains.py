@@ -36,7 +36,17 @@ LOOKBACK = timedelta(hours=24)
 
 
 DECAY = 0.55
-MAX_DEPTH = 6
+# 6 was an arbitrary cutoff that hard-froze scores for any chain longer than
+# ~7 hops: every extension past that point produced the exact same score,
+# bit-for-bit, because the walk simply stopped discovering ancestors/
+# descendants rather than letting DECAY's own exponential falloff make them
+# negligible. 25 is chosen so the decay itself does that work instead --
+# DECAY**25 ~= 2e-7, already far below floating-point relevance at the score
+# precision this service rounds to -- so this is the depth at which going
+# further genuinely stops mattering, not an arbitrary earlier stopping point.
+# MAX_VISIT below still bounds total work per call regardless of depth, so
+# this costs nothing on wide graphs and only helps deep/chain-like ones.
+MAX_DEPTH = 25
 MAX_VISIT = 2000
 
 

@@ -86,6 +86,35 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
         self.assertTrue(ex1 < ex2 < ex3 < ex4 < ex5)
 
 
+class DeepChainCoherenceTests(unittest.TestCase):
+    """Structural Consistency requires coherent behavior across structurally
+    related scenarios, not just the five short documented examples. A long
+    linear extension chain is the simplest structurally-related-but-untested
+    scenario the spec's own Example 2 implies -- and previously exposed a
+    real bug: MAX_DEPTH=6 caused every hop past #6 to score bit-for-bit
+    identically (the walk stopped discovering ancestors rather than letting
+    DECAY's own falloff make them negligible), meaning an 8-hop chain and a
+    20-hop chain were indistinguishable. MAX_DEPTH=25 fixes this by making
+    the exponential decay itself the reason distant nodes stop mattering."""
+
+    def test_long_extension_chain_never_plateaus_to_an_identical_score(self):
+        chain = [(f"N{i}", f"N{i + 1}") for i in range(15)]
+        scores = _run_chain(chain)
+        consecutive_pairs = list(zip(scores, scores[1:]))
+        self.assertTrue(
+            all(a != b for a, b in consecutive_pairs[5:]),
+            f"scores repeated identically somewhere past hop 5: {scores}",
+        )
+
+    def test_long_extension_chain_keeps_increasing(self):
+        chain = [(f"N{i}", f"N{i + 1}") for i in range(15)]
+        scores = _run_chain(chain)
+        self.assertTrue(
+            all(a < b for a, b in zip(scores, scores[1:])),
+            f"score did not strictly increase somewhere: {scores}",
+        )
+
+
 class SelfTransferAndIsolationTests(unittest.TestCase):
     def test_self_transfer_always_scores_zero(self):
         scores = _run_chain([("M", "A"), ("A", "C"), ("C", "M"), ("M", "M")])
