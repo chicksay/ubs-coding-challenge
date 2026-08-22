@@ -436,6 +436,42 @@ class GhostChainsService:
        return round(1.0 - (1.0 + mass / SATURATION) ** -TAIL, 9)
 
 
+   def _identity_streak(self, node, attr):
+       """How many consecutive active predecessor hops into `node` carry the
+       identical identity value, walking backward -- the length of the
+       established trail an evasion at `node` would be breaking. Phase 2
+       Core Principle: "the suspicious case is a consistent flow that stops
+       carrying its identity" -- a single prior hop that happened to carry
+       some value is much weaker evidence of an established, consistent
+       flow than several consecutive hops sharing the same one, so this must
+       be graduated rather than a flat "predecessor had something" check."""
+       streak = 0
+       value = None
+       current = node
+       visited = {node}
+       while streak < MAX_DEPTH:
+           predecessor_value = None
+           predecessor_node = None
+           for edge_src, edge_dst, edge_ip, edge_device, _ in self._active.values():
+               if edge_dst != current:
+                   continue
+               candidate = edge_ip if attr == "ip" else edge_device
+               if candidate is None:
+                   continue
+               predecessor_value = candidate
+               predecessor_node = edge_src
+               break
+           if predecessor_value is None or predecessor_node in visited:
+               break
+           if value is None:
+               value = predecessor_value
+           elif predecessor_value != value:
+               break
+           streak += 1
+           visited.add(predecessor_node)
+           current = predecessor_node
+       return streak
+
    def _identity_mass(self, src, dst, ip, device, local_component):
        """Identity signal: ipAddress/deviceId scored relative to where this
        transaction sits in the active graph, ip and device as independent
@@ -448,13 +484,12 @@ class GhostChainsService:
        for attr, value in (("ip", ip), ("device", device)):
            if value is None:
                # Absence only matters if a direct predecessor into src carried
-               # this attribute -- a dropped trail, not absence in a vacuum.
-               for edge_src, edge_dst, edge_ip, edge_device, edge_amount in self._active.values():
-                   if edge_dst != src:
-                       continue
-                   if (edge_ip if attr == "ip" else edge_device) is not None:
-                       total += W_IDENTITY_EVASION
-                       break
+               # this attribute -- a dropped trail, not absence in a vacuum --
+               # and how suspicious depends on how established that trail was
+               # (see _identity_streak).
+               streak = self._identity_streak(src, attr)
+               if streak > 0:
+                   total += W_IDENTITY_EVASION * (1.0 - DECAY ** streak)
                continue
 
            external_users = set()

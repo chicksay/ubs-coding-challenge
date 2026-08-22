@@ -237,6 +237,32 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(result["transactions"][0]["riskScore"], 0.0)
 
 
+class IdentityEvasionStreakTests(unittest.TestCase):
+    """Phase 2 Core Principle (ghost_chains_phase2.txt): "Missing fields are
+    normal on unrelated transactions; the suspicious case is a **consistent**
+    flow that stops carrying its identity. Weigh absence against the
+    surrounding structure." None of the given examples test how *established*
+    the dropped trail was before checking this: a single prior hop that
+    happened to carry some value is much weaker evidence of a consistent
+    flow than several consecutive hops sharing the identical one, so the
+    evasion signal must scale with that, not fire as a flat bonus the moment
+    any predecessor had something."""
+
+    def test_longer_consistent_trail_makes_the_drop_more_suspicious(self):
+        one_leg = _run_chain([("X", "Y", {"deviceId": "dev_z"}), ("Y", "Z", {})])[-1]
+        two_leg = _run_chain([
+            ("A", "B", {"deviceId": "d1"}), ("B", "C", {"deviceId": "d1"}), ("C", "D", {}),
+        ])[-1]
+        three_leg = _run_chain([
+            ("P", "Q", {"deviceId": "d1"}), ("Q", "R", {"deviceId": "d1"}),
+            ("R", "S", {"deviceId": "d1"}), ("S", "T", {}),
+        ])[-1]
+        no_identity = _run_chain([("X", "Y", {}), ("Y", "Z", {})])[-1]
+        self.assertLess(no_identity, one_leg)
+        self.assertLess(one_leg, two_leg)
+        self.assertLess(two_leg, three_leg)
+
+
 class Phase2IdentityScoringTests(unittest.TestCase):
     def test_example_1_consistent_identity_chain(self):
         scores = _run_chain([
@@ -283,12 +309,18 @@ class Phase2IdentityScoringTests(unittest.TestCase):
         self.assertEqual(scores, [0.0, 0.0, 0.0])
 
     def test_missing_identity_after_it_was_present_on_connected_flow_is_suspicious(self):
+        # Value shifted by the identity-streak fix: the evasion bonus is now
+        # graduated by how many *consecutive* prior legs actually shared the
+        # dropped value (2 here), rather than a flat bonus for "the immediate
+        # predecessor had something" -- see IdentityEvasionStreakTests for the
+        # regression this was fixed against (a 1-leg drop scoring nearly as
+        # high as this established 2-leg one).
         scores = _run_chain([
             ("Meridian", "Apex", {"deviceId": "dev_ios_7f3a91"}),
             ("Apex", "Cascade", {"deviceId": "dev_ios_7f3a91"}),
             ("Cascade", "Horizon", {}),  # device dropped after 2 consistent legs
         ])
-        self.assertEqual(scores, [0.0, 0.132739289, 0.354102862])
+        self.assertEqual(scores, [0.0, 0.132739289, 0.292794561])
 
     def test_isolated_transaction_with_identity_but_no_prior_context_scores_zero(self):
         scores = _run_chain([("M", "A", {"deviceId": "dev_x"})])
