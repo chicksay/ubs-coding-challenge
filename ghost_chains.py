@@ -229,7 +229,7 @@ class GhostChainsService:
         return [
             stored.transaction
             for stored in self._processed_order
-            if earliest - EPS <= stored.transaction.created_at <= created_at + EPS
+            if stored.transaction.created_at >= earliest - EPS
         ]
 
     def _prune_storage(self) -> None:
