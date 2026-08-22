@@ -116,6 +116,23 @@ class GhostChainsService:
            return [self._process_one(raw) for raw in transactions]
 
 
+   def process_transactions(self, payload):
+       if not isinstance(payload, dict):
+           raise ValueError("Request body must be a JSON object")
+       transactions = payload.get("transactions")
+       if not isinstance(transactions, list):
+           raise ValueError("transactions must be an array")
+       return {"transactions": self.process_batch(transactions)}
+
+
+   def clear(self, payload):
+       if not isinstance(payload, dict) or payload.get("clearTransactions") is not True:
+           raise ValueError('Request body must be {"clearTransactions": true}')
+       with self._lock:
+           self.reset()
+       return {"clearTransactions": True}
+
+
    def _add_edge(self, src, dst, created):
        self._adj[src].add(dst)
        self._rev[dst].add(src)
