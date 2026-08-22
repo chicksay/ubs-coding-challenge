@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from adaptive_gateway import transform as adaptive_gateway_transform
 from kan_chiong_driver import solve as kan_chiong_solve
+from showdown_bot import choose_action as showdown_choose_action
 
 NULL_RESULT = {"total_duration_sec": None, "arrival_time": None, "path": []}
 
@@ -42,9 +43,14 @@ def _handle_adaptive_gateway(body):
     return adaptive_gateway_transform(body)
 
 
+def _handle_showdown(body):
+    return showdown_choose_action(body)
+
+
 ROUTES = {
     "/kan-cheong-delivery-driver": _handle_kan_chiong,
     "/solve": _handle_adaptive_gateway,
+    "/showdown": _handle_showdown,
 }
 
 
