@@ -7,12 +7,17 @@ recurring flow, measured over the active 24h window:
 
  * pairs (a, d) that become connected for the first time      -> weak signal
  * pairs (a, d) that gain an additional route                 -> medium signal
+ * pairs (a, d) whose existing shortest route gets shorter    -> medium signal
  * nodes that can now reach themselves through the new edge   -> strong signal
 
 
 Every contribution is discounted by the length of the path it creates, so
-short structures dominate long ones. Pair mass factorises as
-sum_a y^dist(a,u) * sum_d y^dist(v,d), so no pair is ever enumerated.
+short structures dominate long ones. Ancestor and descendant mass are each
+computed once via bounded BFS (sum_a y^dist(a,u), sum_d y^dist(v,d)); pairs
+themselves are not enumerated, but classifying whether a given (a, d) pair
+already existed *does* require one bounded reachability check per ancestor
+against the descendant set, since two nodes can already be connected by a
+path that never touches this edge's own endpoints (see _score).
 
 
 Active history is exactly the most recent 24 hours: an edge is live while
@@ -52,6 +57,17 @@ MAX_VISIT = 2000
 
 W_NEW_PAIR = 1.0
 W_EXTRA_ROUTE = 3.0
+# Core Principle (ghost_chains.txt): "the combined effect of new OR SHORTENED
+# paths between entities." fresh_pairs/extra_routes above only ever compare
+# an already-linked pair's mass against zero -- they never compare the new
+# route's length against the length the pair already had. A shortcut that
+# collapses an existing 3-hop relationship into 1 hop and a same-length
+# parallel route (e.g. Phase 1 Example 3's convergence) were previously
+# scored by the identical mechanism; W_SHORTEN gives the strictly-shorter
+# case its own explicit, additive credit, matching the same weight as an
+# extra route since both are "route" signals -- shortening is the sub-case
+# the principle calls out by name, not a separate tier of severity.
+W_SHORTEN = 3.0
 W_FAN = 0.35
 W_CYCLE = 12.0
 CYCLE_REINFORCEMENT = 1.0
@@ -220,8 +236,13 @@ class GhostChainsService:
 
 
    def _walk(self, graph, start, limit=MAX_DEPTH):
-       """Depth-limited BFS. Also reports whether start is reachable from itself."""
+       """Depth-limited BFS. Also reports whether start is reachable from
+       itself, and each discovered node's parent in the shortest-path tree
+       rooted at `start` -- used to reconstruct one witness path for a
+       specific cycle, rather than conflating every cycle the new edge
+       might close into a single merged node set (see _chain_nodes)."""
        dist = {start: 0}
+       parent = {start: None}
        loops_back = False
        frontier = [start]
        depth = 0
@@ -235,11 +256,24 @@ class GhostChainsService:
                    if peer in dist:
                        continue
                    dist[peer] = depth
+                   parent[peer] = node
                    nxt.append(peer)
                    if len(dist) >= MAX_VISIT:
-                       return dist, loops_back
+                       return dist, loops_back, parent
            frontier = nxt
-       return dist, loops_back
+       return dist, loops_back, parent
+
+
+   def _chain_nodes(self, parent, node):
+       """Nodes along the shortest-path chain from `node` back to the walk's
+       root, by following BFS parent pointers -- one witness path, used to
+       scope a cycle's temporal factor to its own edges only."""
+       nodes = set()
+       cur = node
+       while cur is not None:
+           nodes.add(cur)
+           cur = parent.get(cur)
+       return nodes
 
 
    def _oldest_edge_within(self, nodes):
@@ -273,34 +307,41 @@ class GhostChainsService:
 
 
    def _score(self, src, dst, created, ip, device, amount):
-       upstream, src_looped = self._walk(self._rev, src)
-       downstream, dst_looped = self._walk(self._adj, dst)
-       src_reaches, _ = self._walk(self._adj, src)
-       reaches_dst, _ = self._walk(self._rev, dst)
+       upstream, src_looped, upstream_parent = self._walk(self._rev, src)
+       downstream, dst_looped, downstream_parent = self._walk(self._adj, dst)
+       src_reaches, _, _ = self._walk(self._adj, src)
+       reaches_dst, _, _ = self._walk(self._rev, dst)
 
 
        already_linked = dst in src_reaches
 
 
-       total_in = extra_in = 0.0
+       downstream_weight = {node: _DECAY_POW[depth] for node, depth in downstream.items()}
+       total_out = sum(downstream_weight.values())
+
+       # Exact pair classification: for each ancestor `a`, find exactly how
+       # much of the descendant mass it can already reach -- bounded by the
+       # same MAX_DEPTH/MAX_VISIT budget as every other walk here -- instead
+       # of approximating "already connected" via the coarse a-reaches-dst /
+       # d-reached-by-src proxies. Those proxies are blind to an ancestor and
+       # descendant that are already linked by some path which never touches
+       # src or dst at all (e.g. a shared upstream node two branches over),
+       # which would otherwise get double-counted as a brand-new connection.
+       # a=src's reach is already computed as src_reaches; every other
+       # ancestor gets its own bounded forward walk.
+       fresh_pairs = extra_routes = 0.0
        for node, depth in upstream.items():
            weight = _DECAY_POW[depth]
-           total_in += weight
-           if node in reaches_dst:
-               extra_in += weight
+           if node == src:
+               reach = src_reaches
+           else:
+               reach, _, _ = self._walk(self._adj, node)
+           reachable_out = sum(w for d, w in downstream_weight.items() if d in reach)
+           fresh_pairs += weight * (total_out - reachable_out)
+           extra_routes += weight * reachable_out
 
-
-       total_out = extra_out = 0.0
-       for node, depth in downstream.items():
-           weight = _DECAY_POW[depth]
-           total_out += weight
-           if node in src_reaches:
-               extra_out += weight
-
-
-       every_pair = DECAY * total_in * total_out
-       fresh_pairs = DECAY * (total_in - extra_in) * (total_out - extra_out)
-       extra_routes = every_pair - fresh_pairs
+       fresh_pairs *= DECAY
+       extra_routes *= DECAY
        # The edge's own (src, dst) pair is the edge itself, not a path it enables.
        if already_linked:
            extra_routes -= DECAY
@@ -310,14 +351,57 @@ class GhostChainsService:
        extra_routes = max(0.0, extra_routes)
 
 
-       cycle_nodes = set()
+       # Shortened-path signal (Core Principle: "new or shortened paths").
+       # For an already-linked pair (a, d), fresh_pairs/extra_routes above
+       # only know a route exists -- not whether this edge made it shorter.
+       # reaches_dst already gives every ancestor's existing distance to dst;
+       # src_reaches gives dst's existing distance from every descendant of
+       # src. If routing through this edge (upstream depth + 1, or 1 +
+       # downstream depth) beats the pair's prior shortest distance, this
+       # transaction collapsed that relationship -- weighted by how much
+       # shorter the new route is, not just that an alternative exists.
+       shorten_mass = 0.0
+       existing_src_to_dst = reaches_dst.get(src)
+       if existing_src_to_dst is not None and existing_src_to_dst > 1:
+           saved = existing_src_to_dst - 1
+           shorten_mass += _DECAY_POW[1] * (1.0 - DECAY ** saved)
+       for node, depth in upstream.items():
+           if depth == 0:
+               continue  # src itself, handled above
+           old_dist = reaches_dst.get(node)
+           if old_dist is None:
+               continue
+           new_dist = depth + 1
+           if new_dist < old_dist:
+               saved = old_dist - new_dist
+               shorten_mass += _DECAY_POW[new_dist] * (1.0 - DECAY ** saved)
+       for node, depth in downstream.items():
+           if depth == 0:
+               continue  # dst itself, already covered via src_to_dst above
+           old_dist = src_reaches.get(node)
+           if old_dist is None:
+               continue
+           new_dist = depth + 1
+           if new_dist < old_dist:
+               saved = old_dist - new_dist
+               shorten_mass += _DECAY_POW[new_dist] * (1.0 - DECAY ** saved)
+
        cycle_mass = 0.0
        for node, depth in upstream.items():
            back = downstream.get(node)
            if back is None:
                continue
-           cycle_nodes.add(node)
-           cycle_mass += _DECAY_POW[min(depth + 1 + back, len(_DECAY_POW) - 1)]
+           raw = _DECAY_POW[min(depth + 1 + back, len(_DECAY_POW) - 1)]
+           # Scope the temporal factor to *this* cycle's own witnessed path
+           # (src-side via upstream_parent, dst-side via downstream_parent),
+           # not the union of every cycle the new edge happens to close --
+           # an unrelated slow-forming loop that merely shares a node with
+           # this one must not dilute this cycle's own closing speed.
+           path_nodes = (
+               self._chain_nodes(upstream_parent, node)
+               | self._chain_nodes(downstream_parent, node)
+           )
+           cycle_mass += raw * self._temporal_factor(path_nodes, created)
 
 
        if src_looped or dst_looped:
@@ -339,14 +423,12 @@ class GhostChainsService:
        mass = (
            W_NEW_PAIR * fresh_pairs * damping
            + W_EXTRA_ROUTE * extra_routes * damping
+           + W_SHORTEN * shorten_mass * damping
            + W_FAN * fan
            + W_CYCLE * cycle_mass
            + identity_mass
            + value_mass
        )
-
-       if cycle_nodes:
-           mass *= self._temporal_factor(cycle_nodes, created)
 
 
        if mass <= 0.0:

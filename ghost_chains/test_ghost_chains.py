@@ -50,15 +50,26 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
         self.assertEqual(scores[-1], 0.152311329)
 
     def test_example_4_return(self):
+        # Pinned value shifted by the temporal-scoping fix: the cycle's
+        # temporal factor previously multiplied the *entire* mass (fresh
+        # pairs, extra routes, fan) even though TEMPORAL_FLOOR's own comment
+        # says only cycle mass should be scaled; it's now applied to
+        # cycle_mass alone, scoped to this cycle's own witnessed path (see
+        # StructuralExactnessTests / TemporalScopeTests for the confirmed
+        # bugs this fixes). Ordering (test_examples_are_strictly_increasing)
+        # is unaffected.
         scores = _run_chain([
             ("Meridian", "Apex"),
             ("Apex", "Cascade"),
             ("Cascade", "Oakridge"),
             ("Oakridge", "Apex"),
         ])
-        self.assertEqual(scores[-1], 0.564647158)
+        self.assertEqual(scores[-1], 0.572236348)
 
     def test_example_5_multi_loop(self):
+        # See test_example_4_return: temporal factor now scoped to cycle_mass
+        # only, per-cycle rather than merged across every cycle the new edge
+        # closes.
         scores = _run_chain([
             ("Meridian", "Apex"),
             ("Apex", "Cascade"),
@@ -66,7 +77,7 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
             ("Apex", "Nimbus"),
             ("Nimbus", "Meridian"),
         ])
-        self.assertEqual(scores[-1], 0.690655806)
+        self.assertEqual(scores[-1], 0.690689199)
 
     def test_examples_are_strictly_increasing(self):
         ex1 = _run_chain([("Meridian", "Apex")])[-1]
@@ -84,6 +95,33 @@ class Phase1DocumentedExamplesTests(unittest.TestCase):
             ("Apex", "Nimbus"), ("Nimbus", "Meridian"),
         ])[-1]
         self.assertTrue(ex1 < ex2 < ex3 < ex4 < ex5)
+
+
+class ShortenedPathTests(unittest.TestCase):
+    """Core Principle (ghost_chains.txt): risk reflects "the combined effect
+    of new OR SHORTENED paths between entities." A shortcut that collapses
+    an existing long relationship into a direct edge is a distinct signal
+    from either a first-time connection or a same-length parallel route
+    (Example 3's convergence) -- neither of the given examples tests a
+    genuine shortcut, so this was previously unverified and, when checked,
+    scored a dramatic shortcut *lower* than a plain further extension."""
+
+    def test_shortcut_scores_higher_than_a_plain_further_extension(self):
+        plain_extension = _run_chain([("A", "B"), ("B", "C"), ("C", "D")])[-1]
+        shortcut = _run_chain([("A", "B"), ("B", "C"), ("C", "D"), ("A", "D")])[-1]
+        self.assertGreater(shortcut, plain_extension)
+
+    def test_same_length_parallel_route_is_unaffected_by_the_shortening_signal(self):
+        # Example 3's convergence: Meridian->Sterling is distance 2 via Apex
+        # both before and after Horizon->Sterling fires -- not a shortening,
+        # so this pins that the new signal stays silent on same-length routes.
+        scores = _run_chain([
+            ("Meridian", "Apex"),
+            ("Meridian", "Horizon"),
+            ("Apex", "Sterling"),
+            ("Horizon", "Sterling"),
+        ])
+        self.assertEqual(scores[-1], 0.152311329)
 
 
 class DeepChainCoherenceTests(unittest.TestCase):
@@ -117,8 +155,10 @@ class DeepChainCoherenceTests(unittest.TestCase):
 
 class SelfTransferAndIsolationTests(unittest.TestCase):
     def test_self_transfer_always_scores_zero(self):
+        # Third value shifted by the temporal-scoping fix -- see
+        # Phase1DocumentedExamplesTests.test_example_4_return.
         scores = _run_chain([("M", "A"), ("A", "C"), ("C", "M"), ("M", "M")])
-        self.assertEqual(scores, [0.0, 0.049751093, 0.548485363, 0.0])
+        self.assertEqual(scores, [0.0, 0.049751093, 0.556762052, 0.0])
 
     def test_structurally_isolated_transaction_scores_zero_even_with_unrelated_prior_activity(self):
         scores = _run_chain([
@@ -159,8 +199,11 @@ class TemporalSpacingConsistencyTests(unittest.TestCase):
             ("Cascade", "Oakridge", {"createdAt": "2026-06-08T23:40:00Z"}),
             ("Oakridge", "Apex", {"createdAt": "2026-06-09T11:45:00Z"}),
         ])[-1]
-        self.assertEqual(tight, 0.564647158)
-        self.assertEqual(spread, 0.503290482)
+        # Both pinned values shifted by the temporal-scoping fix -- see
+        # Phase1DocumentedExamplesTests.test_example_4_return. The relative
+        # ordering this test exists to check (spread < tight) is unaffected.
+        self.assertEqual(tight, 0.572236348)
+        self.assertEqual(spread, 0.535919711)
         self.assertLess(spread, tight)
 
 
@@ -176,11 +219,13 @@ class WindowBoundaryTests(unittest.TestCase):
         self.assertEqual(scores[-1], 0.0)
 
     def test_cycle_still_detected_one_second_before_the_24h_cutoff(self):
+        # Pinned value shifted by the temporal-scoping fix -- see
+        # Phase1DocumentedExamplesTests.test_example_4_return.
         scores = _run_chain([
             ("A", "B", {"createdAt": "2026-06-08T12:00:00Z"}),
             ("B", "A", {"createdAt": "2026-06-09T11:59:59Z"}),
         ])
-        self.assertEqual(scores[-1], 0.513014721)
+        self.assertEqual(scores[-1], 0.529912237)
 
 
 class ResetTests(unittest.TestCase):
@@ -402,6 +447,84 @@ class CrossSignalMonotonicityTests(unittest.TestCase):
             ("Horizon", "Nimbus", {"amount": 10100.0, "ipAddress": "10.0.0.2"}),  # matches spec example
         ])[-1]
         self.assertGreater(different_ip_reversal, same_ip_consistent_decay)
+
+
+class StructuralExactnessTests(unittest.TestCase):
+    """The pair-mass classifier must not credit (ancestor, descendant) as a
+    first-time connection when they were already connected via some other
+    path that never touches src/dst -- per the spec's own signal hierarchy,
+    "gains an additional route" is a *stronger* (medium) signal than "becomes
+    connected for the first time" (weak), so correctly recognizing an
+    already-existing connection must score it as the former, not silently
+    fold it into the latter."""
+
+    def test_ancestor_already_reaching_descendant_via_unrelated_path_scores_higher(self):
+        # A --SRC edge and DST-- D edge in both scenarios; scenario 2 also
+        # has an entirely independent A->X->D path with nothing to do with
+        # SRC or DST, so (A, D) already had a route -- adding SRC->DST gives
+        # it an *additional* one (medium signal) rather than connecting it
+        # for the first time (weak signal), unlike scenario 1.
+        unrelated_before = _run_chain([
+            ("A", "SRC"),
+            ("DST", "D"),
+            ("SRC", "DST"),
+        ])[-1]
+        already_connected_before = _run_chain([
+            ("A", "X"),
+            ("X", "D"),
+            ("A", "SRC"),
+            ("DST", "D"),
+            ("SRC", "DST"),
+        ])[-1]
+        self.assertGreater(already_connected_before, unrelated_before)
+
+
+class TemporalScopeTests(unittest.TestCase):
+    """A cycle's temporal factor must reflect *that* cycle's own edges, not
+    the oldest edge across every distinct cycle the new transaction happens
+    to close simultaneously -- an unrelated slow-forming loop must not drag
+    a genuinely fast-closing loop's credit down toward its own floor.
+
+    This checks the mechanism directly (per-pivot _temporal_factor via the
+    reconstructed cycle path) rather than the end-to-end score: the overall
+    score also carries the exact-reachability fix's pair-mass reclassification
+    (StructuralExactnessTests), which reshuffles fresh_pairs/extra_routes
+    unevenly across scenarios with different route counts and swamps this
+    effect at the aggregate level -- a black-box comparison of whole scores
+    can't isolate it cleanly, so this asserts on the actual per-cycle
+    temporal_factor value instead."""
+
+    def test_fast_route_keeps_full_temporal_credit_despite_a_slow_coexisting_route(self):
+        from datetime import datetime
+
+        def parse(ts):
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+        svc = GhostChainsService()
+        # Fast route: DST->P->SRC, ~2 minutes old.
+        svc._add_edge("DST", "P", parse("2026-06-08T12:00:00Z"))
+        svc._add_edge("P", "SRC", parse("2026-06-08T12:01:00Z"))
+        # A second, independent, much older return route: DST->Q->SRC, ~20h old.
+        svc._add_edge("DST", "Q", parse("2026-06-07T16:00:00Z"))
+        svc._add_edge("Q", "SRC", parse("2026-06-07T16:01:00Z"))
+        created = parse("2026-06-08T12:02:00Z")
+
+        upstream, _, upstream_parent = svc._walk(svc._rev, "SRC")
+        downstream, _, downstream_parent = svc._walk(svc._adj, "DST")
+
+        factors = {}
+        for node, depth in upstream.items():
+            back = downstream.get(node)
+            if back is None:
+                continue
+            path_nodes = svc._chain_nodes(upstream_parent, node) | svc._chain_nodes(downstream_parent, node)
+            factors[node] = svc._temporal_factor(path_nodes, created)
+
+        # P's own pivot must sit on the fast route's witnessed path only
+        # ({SRC, P, DST}), earning near-full temporal weight regardless of
+        # Q's staleness.
+        self.assertIn("P", factors)
+        self.assertGreater(factors["P"], 0.999)
 
 
 if __name__ == "__main__":

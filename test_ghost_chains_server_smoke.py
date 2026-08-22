@@ -87,7 +87,7 @@ class GhostChainsServerSmokeTests(unittest.TestCase):
         # Phase 1 Example 4 (Return), run entirely through the HTTP layer --
         # confirms the served endpoint reaches the actual tuned scorer, not
         # just that GhostChainsService behaves when imported directly in a
-        # unit test. 0.564647158 must match ghost_chains/test_ghost_chains.py's
+        # unit test. 0.572236348 must match ghost_chains/test_ghost_chains.py's
         # pinned value for this same example -- if it doesn't, the HTTP layer
         # and the unit-tested module have drifted apart.
         status, body = self._post("/ghost-chains/transactions", {"transactions": [
@@ -101,7 +101,7 @@ class GhostChainsServerSmokeTests(unittest.TestCase):
             [t["txId"] for t in body["transactions"]], ["e4_1", "e4_2", "e4_3", "e4_4"],
         )
         scores = [t["riskScore"] for t in body["transactions"]]
-        self.assertEqual(scores[-1], 0.564647158)
+        self.assertEqual(scores[-1], 0.572236348)
 
     def test_duplicate_txid_returns_original_score_via_http(self):
         tx = {"txId": "dup1", "fromUserId": "A", "toUserId": "B", "amount": 10.0, "createdAt": "2026-06-08T12:00:00Z"}
