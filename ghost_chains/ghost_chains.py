@@ -41,11 +41,31 @@ MAX_VISIT = 2000
 
 
 W_NEW_PAIR = 1.0
-W_EXTRA_ROUTE = 3.0
-W_FAN = 0.35
-W_CYCLE = 12.0
+# W_EXTRA_ROUTE, W_FAN, W_CYCLE below (and SATURATION/TAIL further down) were
+# moved from their original hand-picked values to the most robust point found
+# by ghost_chains_gridsearch.py's constraint-margin search over the diagnosis
+# doc's flagged weighting-mismatch constants (ghost_chains_diagnosis.txt,
+# cause 1) -- the combination that maximized the worst-case margin across all
+# seven known ordinal constraints (Phase 1 ordering, Phase 2 divergence/reuse,
+# Phase 3 ordering/convergence, both cross-signal checks), not the combination
+# tuned to any single example. All five parameters landed on the edge of the
+# grid actually searched, so this is the most robust point *found*, not a
+# confirmed interior optimum -- treat the next real evaluation's
+# STRUCTURAL_DEVIATION severity as the actual test of this choice.
+W_EXTRA_ROUTE = 2.0
+W_FAN = 0.2
+W_CYCLE = 8.0
 CYCLE_REINFORCEMENT = 1.0
 REPEAT_EDGE_DAMPING = 0.35
+
+# Diagnosis finding: a return loop that closes quickly is a stronger
+# laundering signal than one that takes most of the 24h window to close --
+# fast round-tripping is the classic layering red flag, while a slow-closing
+# loop looks more like ordinary recurring business. Cycle mass is scaled
+# toward TEMPORAL_FLOOR as the loop's oldest edge nears the window boundary;
+# TEMPORAL_FLOOR = 1.0 would be a no-op (validated against ghost_chains_diag.py
+# before porting here -- see ghost_chains_diagnosis.txt experiment A).
+TEMPORAL_FLOOR = 0.75
 
 # Phase 2: identity signal. A shared ipAddress/deviceId is scored relative to
 # where the transaction sits in the graph, not as a standalone rule -- these
@@ -54,12 +74,30 @@ W_IDENTITY_REUSE = 2.5
 W_IDENTITY_CONSISTENCY = 0.6
 W_IDENTITY_EVASION = 3.0
 
+# Phase 3: value signal. amount is compared against each direct active
+# predecessor edge's amount -- one hop back, recomputed live every call, no
+# persistent path state. Retaining most of the prior amount is the expected
+# layering signature (a small confirming nudge); an amount *increase* against
+# its immediate predecessor is a trajectory reversal, a direct contradiction
+# of that pattern, and is weighted well above plain consistency.
+W_VALUE_CONSISTENCY = 0.6
+W_VALUE_REVERSAL = 3.0
+# Both directions use the same DECAY**(deviation/scale) shape -- symmetric in
+# the size of the deviation from ratio 1.0, differing only in which side of
+# 1.0 they read and how heavily they're weighted above. VALUE_DEVIATION_SCALE
+# is set to the ~1% per-hop skim rate the spec's own consistent-decay example
+# uses, so that example's deviations sit near one scale unit (a moderate,
+# non-saturated signal) while its reversal example's deviation -- explicitly
+# "already a direct contradiction" per spec -- saturates quickly rather than
+# growing slowly from zero the way DECAY**excess alone would.
+VALUE_DEVIATION_SCALE = 0.01
+
 
 # Scores are relative ranks, so the mass -> [0,1) map must stay strictly
 # increasing. A map that flattens to 1.0 would tie every busy transaction
 # together and destroy the ranking on dense streams.
-SATURATION = 4.0
-TAIL = 0.7
+SATURATION = 3.0
+TAIL = 0.9
 
 
 _DECAY_POW = [DECAY ** i for i in range(MAX_DEPTH * 2 + 4)]
@@ -205,7 +243,37 @@ class GhostChainsService:
        return dist, loops_back
 
 
-   def _score(self, src, dst, ip, device):
+   def _oldest_edge_within(self, nodes):
+       """Earliest active edge with both endpoints in `nodes` -- how long this
+       local structure has existed, used to judge how quickly a cycle closed
+       relative to the 24h window."""
+       oldest = None
+       for src in sorted(nodes):
+           for dst in self._adj.get(src, ()):
+               if dst not in nodes:
+                   continue
+               first = self._edge_times[(src, dst)][0]
+               if oldest is None or first < oldest:
+                   oldest = first
+       return oldest
+
+
+   def _temporal_factor(self, nodes, created):
+       """Scale cycle mass down as the loop's oldest edge nears the 24h
+       boundary -- a loop closing within minutes is weighted at full
+       strength; one that barely closes before its start would expire is
+       weighted toward TEMPORAL_FLOOR."""
+       oldest = self._oldest_edge_within(nodes)
+       if oldest is None:
+           return 1.0
+       span = (created - oldest).total_seconds()
+       if span <= 0:
+           return 1.0
+       share = min(1.0, span / LOOKBACK.total_seconds())
+       return 1.0 - (1.0 - TEMPORAL_FLOOR) * share
+
+
+   def _score(self, src, dst, created, ip, device, amount):
        upstream, src_looped = self._walk(self._rev, src)
        downstream, dst_looped = self._walk(self._adj, dst)
        src_reaches, _ = self._walk(self._adj, src)
@@ -268,13 +336,18 @@ class GhostChainsService:
        damping = REPEAT_EDGE_DAMPING if (src, dst) in self._edge_times else 1.0
        local_component = upstream.keys() | downstream.keys() | src_reaches.keys() | reaches_dst.keys()
        identity_mass = self._identity_mass(src, dst, ip, device, local_component)
+       value_mass = self._value_mass(src, amount)
        mass = (
            W_NEW_PAIR * fresh_pairs * damping
            + W_EXTRA_ROUTE * extra_routes * damping
            + W_FAN * fan
            + W_CYCLE * cycle_mass
            + identity_mass
+           + value_mass
        )
+
+       if cycle_nodes:
+           mass *= self._temporal_factor(cycle_nodes, created)
 
 
        if mass <= 0.0:
@@ -295,7 +368,7 @@ class GhostChainsService:
            if value is None:
                # Absence only matters if a direct predecessor into src carried
                # this attribute -- a dropped trail, not absence in a vacuum.
-               for edge_src, edge_dst, edge_ip, edge_device in self._active.values():
+               for edge_src, edge_dst, edge_ip, edge_device, edge_amount in self._active.values():
                    if edge_dst != src:
                        continue
                    if (edge_ip if attr == "ip" else edge_device) is not None:
@@ -306,7 +379,7 @@ class GhostChainsService:
            external_users = set()
            predecessor_match = False
            successor_match = False
-           for edge_src, edge_dst, edge_ip, edge_device in self._active.values():
+           for edge_src, edge_dst, edge_ip, edge_device, edge_amount in self._active.values():
                edge_value = edge_ip if attr == "ip" else edge_device
                if edge_value != value:
                    continue
@@ -327,6 +400,35 @@ class GhostChainsService:
                total += W_IDENTITY_CONSISTENCY
 
        return total
+
+   def _value_mass(self, src, amount):
+       """Value signal: amount compared against each direct active predecessor
+       edge's amount -- one hop back, recomputed live every call, no
+       persistent path state. Retaining most of the prior amount confirms
+       the expected layering pattern (a small nudge); an amount *increase*
+       against its immediate predecessor is a trajectory reversal -- a
+       direct contradiction -- weighted well above plain consistency.
+       Only direct predecessor edges into src are considered, so branches
+       and convergence never blend into one global ratio (Phase 3 Core
+       Principle: no blind aggregation across unrelated branches).
+       """
+       if amount is None:
+           return 0.0
+
+       consistency_gap = 1.0
+       reversal_gap = 1.0
+       for edge_src, edge_dst, edge_ip, edge_device, edge_amount in self._active.values():
+           if edge_dst != src or not edge_amount:
+               continue
+           deviation = amount / edge_amount - 1.0
+           if deviation <= 0.0:
+               consistency_gap *= DECAY ** ((-deviation) / VALUE_DEVIATION_SCALE)
+           else:
+               reversal_gap *= DECAY ** (deviation / VALUE_DEVIATION_SCALE)
+
+       consistency_signal = 1.0 - consistency_gap
+       reversal_signal = 1.0 - reversal_gap
+       return W_VALUE_CONSISTENCY * consistency_signal + W_VALUE_REVERSAL * reversal_signal
 
    def _process_one(self, raw):
        if not isinstance(raw, dict):
@@ -353,6 +455,7 @@ class GhostChainsService:
 
        ip = raw.get("ipAddress")
        device = raw.get("deviceId")
+       amount = raw.get("amount")
 
 
        created = _parse_ts(raw.get("createdAt")) or self._clock
@@ -374,7 +477,7 @@ class GhostChainsService:
        if src == dst:
            score = 0.0
        else:
-           score = self._score(src, dst, ip, device)
+           score = self._score(src, dst, created, ip, device, amount)
 
 
        # A transaction that is itself already outside the window is scored but
@@ -386,7 +489,7 @@ class GhostChainsService:
        if created > self._clock - LOOKBACK and src != dst:
            self._add_edge(src, dst, created)
            heapq.heappush(self._expiry, (created, tx_id))
-           self._active[tx_id] = (src, dst, ip, device)
+           self._active[tx_id] = (src, dst, ip, device, amount)
 
 
        self._scores[tx_id] = score
